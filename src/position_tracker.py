@@ -1,5 +1,3 @@
-import os
-import json
 import logging
 from datetime import datetime
 from typing import Optional, Tuple, Dict, Any, List
@@ -10,40 +8,23 @@ from .config import (
     HARD_STOP_LOSS,
     TAKE_PROFIT_TARGET
 )
+from . import database
+from .notifications import send_webhook_alert
 
 logger = logging.getLogger(__name__)
 
-POSITIONS_FILE = "positions.json"
-HISTORY_FILE = "trade_history.json"
-
 class PositionTracker:
-    def __init__(self, positions_file: str = POSITIONS_FILE, history_file: str = HISTORY_FILE):
-        self.positions_file = positions_file
-        self.history_file = history_file
-        self._ensure_files()
-
-    def _ensure_files(self):
-        if not os.path.exists(self.positions_file):
-            with open(self.positions_file, 'w') as f:
-                json.dump({}, f)
-        if not os.path.exists(self.history_file):
-            with open(self.history_file, 'w') as f:
-                json.dump([], f)
+    def __init__(self):
+        # Database is automatically initialized when imported
+        pass
 
     def get_open_positions(self) -> Dict[str, Any]:
-        try:
-            with open(self.positions_file, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Error reading {self.positions_file}: {e}")
-            return {}
+        return database.get_open_positions()
 
     def get_open_position(self, symbol: str) -> Optional[Dict[str, Any]]:
-        positions = self.get_open_positions()
-        return positions.get(symbol)
+        return database.get_open_position(symbol)
 
     def record_entry(self, symbol: str, entry_price: float, amount: float, quote: str = "USDC") -> Dict[str, Any]:
-        positions = self.get_open_positions()
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         pos_data = {
@@ -55,14 +36,13 @@ class PositionTracker:
             "trailing_active": False,
             "entry_time": now_str
         }
-        positions[symbol] = pos_data
         
-        try:
-            with open(self.positions_file, 'w') as f:
-                json.dump(positions, f, indent=2)
-            logger.info(f"[POSITION OPENED] {symbol} @ {entry_price:.4f} | Amount: {amount} {symbol.split('/')[0]}")
-        except Exception as e:
-            logger.error(f"Failed to save position entry: {e}")
+        database.upsert_position(pos_data)
+        logger.info(f"[POSITION OPENED] {symbol} @ {entry_price:.4f} | Amount: {amount} {symbol.split('/')[0]}")
+        
+        # Webhook Notification
+        msg = f"**Symbol:** {symbol}\n**Entry Price:** {entry_price:.4f} {quote}\n**Amount:** {amount}"
+        send_webhook_alert(f"Position Opened: {symbol}", msg, color=65280) # Green
             
         return pos_data
 
@@ -71,19 +51,20 @@ class PositionTracker:
         Evaluates an open position against Stop-Loss, Trailing Stop, and Take-Profit rules.
         Returns: (exit_type, reason, pnl_pct) or None if holding.
         """
-        positions = self.get_open_positions()
-        if symbol not in positions:
+        pos = database.get_open_position(symbol)
+        if not pos:
             return None
 
-        pos = positions[symbol]
         entry_price = pos["entry_price"]
         highest_price = pos.get("highest_price", entry_price)
         trailing_active = pos.get("trailing_active", False)
 
+        changed = False
         # 1. Update highest price if reached new peak
         if current_price > highest_price:
             highest_price = current_price
             pos["highest_price"] = highest_price
+            changed = True
 
         # 2. Calculate PnL percentage relative to entry
         gain_pct = ((current_price - entry_price) / entry_price) * 100.0
@@ -93,15 +74,11 @@ class PositionTracker:
         if peak_gain_pct >= TRAILING_STOP_ACTIVATION and not trailing_active:
             trailing_active = True
             pos["trailing_active"] = True
+            changed = True
             logger.info(f"[{symbol}] Trailing Stop ACTIVATED! Peak Gain: +{peak_gain_pct:.2f}% (Threshold: {TRAILING_STOP_ACTIVATION}%)")
 
-        # Save updated state
-        positions[symbol] = pos
-        try:
-            with open(self.positions_file, 'w') as f:
-                json.dump(positions, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to update position highest price: {e}")
+        if changed:
+            database.upsert_position(pos)
 
         # 4. Check Hard Stop-Loss
         if gain_pct <= -HARD_STOP_LOSS:
@@ -123,11 +100,10 @@ class PositionTracker:
         return None
 
     def record_exit(self, symbol: str, exit_price: float, reason: str) -> Optional[Dict[str, Any]]:
-        positions = self.get_open_positions()
-        if symbol not in positions:
+        pos = database.get_open_position(symbol)
+        if not pos:
             return None
 
-        pos = positions.pop(symbol)
         entry_price = pos["entry_price"]
         amount = pos["amount"]
         quote = pos.get("quote", "USDC")
@@ -149,29 +125,19 @@ class PositionTracker:
             "reason": reason
         }
 
-        # Update positions file
-        try:
-            with open(self.positions_file, 'w') as f:
-                json.dump(positions, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to remove closed position: {e}")
-
-        # Append to trade history
-        try:
-            history = self.get_trade_history()
-            history.append(trade_record)
-            with open(self.history_file, 'w') as f:
-                json.dump(history, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to record trade history: {e}")
+        # Update database
+        database.remove_position(symbol)
+        database.insert_trade_history(trade_record)
 
         logger.info(f"[POSITION CLOSED] {symbol} @ {exit_price:.4f} | Reason: {reason} | PnL: {pnl_pct:+.2f}% ({realized_pnl:+.4f} {quote})")
+        
+        # Webhook Notification
+        color = 65280 if realized_pnl > 0 else 16711680 # Green if profit, Red if loss
+        msg = f"**Symbol:** {symbol}\n**Exit Price:** {exit_price:.4f} {quote}\n**PnL:** {pnl_pct:+.2f}% ({realized_pnl:+.4f} {quote})\n**Reason:** {reason}"
+        send_webhook_alert(f"Position Closed: {symbol}", msg, color=color)
+        
         return trade_record
 
     def get_trade_history(self) -> List[Dict[str, Any]]:
-        try:
-            with open(self.history_file, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Error reading {self.history_file}: {e}")
-            return []
+        return database.get_trade_history()
+

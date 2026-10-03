@@ -5,6 +5,7 @@ load_dotenv()
 
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 DRY_RUN = os.getenv("DRY_RUN", "True").lower() in ("true", "1", "t", "yes")
 _symbols_str = os.getenv("SYMBOLS", "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT")
 SYMBOLS = [s.strip() for s in _symbols_str.split(",") if s.strip()]

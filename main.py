@@ -4,8 +4,6 @@ from src.config import (
     SYMBOLS, 
     TIMEFRAME, 
     DRY_RUN, 
-    CAPITAL_PER_TRADE, 
-    CAPITAL_EUR,
     DYNAMIC_SCREENER
 )
 from src.market_data import MarketData
@@ -14,6 +12,9 @@ from src.execution import ExecutionManager
 from src.visualization import plot_market_graph
 from src.screener import TopMoverScreener
 from src.position_tracker import PositionTracker
+from src.portfolio import PortfolioManager
+from src.risk import RiskEngine
+from src import database
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -21,7 +22,9 @@ logger = logging.getLogger(__name__)
 def main():
     market_data = MarketData()
     strategy = Strategy()
-    executor = ExecutionManager(market_data.exchange)
+    portfolio = PortfolioManager(market_data.exchange)
+    risk_engine = RiskEngine(portfolio)
+    executor = ExecutionManager(market_data.exchange, portfolio)
     tracker = PositionTracker()
     screener = TopMoverScreener(market_data.exchange)
 
@@ -29,13 +32,23 @@ def main():
     logger.info("=" * 60)
     logger.info("Starting Advanced Algorithmic Trading Bot")
     logger.info(f"Mode: {'🟡 DRY RUN' if DRY_RUN else '🟢 LIVE TRADING'}")
-    logger.info(f"Capital Per Trade: {CAPITAL_PER_TRADE} {quote_sample}")
     logger.info(f"Dynamic Screener: {'Enabled' if DYNAMIC_SCREENER else 'Disabled'}")
     logger.info(f"Timeframe: {TIMEFRAME}")
     logger.info("=" * 60)
     
     try:
         while True:
+            # Record current equity snapshot for drawdown tracking
+            current_equity = portfolio.get_total_equity_usd()
+            database.record_equity_snapshot(current_equity)
+
+            # Check Kill-Switch
+            if database.get_kill_switch():
+                logger.warning("🚨 EMERGENCY KILL-SWITCH IS ACTIVE. Trading paused. 🚨")
+                logger.info("Sleeping for 60 seconds...")
+                time.sleep(60)
+                continue
+
             # 1. Update active symbols via Dynamic Screener if enabled
             if DYNAMIC_SCREENER:
                 active_symbols = screener.get_screened_pairs(SYMBOLS, max_extra=2)
@@ -79,17 +92,22 @@ def main():
                 open_positions = tracker.get_open_positions()
 
                 if signal == 'BUY':
-                    # Single-position capital protection rule
-                    if open_positions:
-                        holding_symbols = list(open_positions.keys())
-                        logger.info(f"[{symbol}] BUY signal noted, but already holding open position in {holding_symbols}. Skipping to preserve capital.")
+                    active_count = len(open_positions)
+                    
+                    if symbol in open_positions:
+                        logger.info(f"[{symbol}] Already holding position, skipping BUY.")
                     else:
-                        res = executor.execute_order(symbol, 'buy')
-                        if res:
-                            fill_price = res.get('price', current_price)
-                            fill_amount = res.get('amount', 0.0)
-                            quote = res.get('quote', quote_sample)
-                            tracker.record_entry(symbol, fill_price, fill_amount, quote)
+                        is_valid, reason, size_usd = risk_engine.validate_entry(symbol, active_count, quote_sample)
+                        
+                        if not is_valid:
+                            logger.info(f"[{symbol}] BUY signal skipped: {reason}")
+                        else:
+                            res = executor.execute_order(symbol, 'buy', size_usd)
+                            if res:
+                                fill_price = res.get('price', current_price)
+                                fill_amount = res.get('amount', 0.0)
+                                quote = res.get('quote', quote_sample)
+                                tracker.record_entry(symbol, fill_price, fill_amount, quote)
 
                 elif signal == 'SELL':
                     if symbol in open_positions:

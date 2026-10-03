@@ -7,3 +7,4 @@ vaderSentiment>=3.3.2
 mplfinance>=0.12.10b0
 streamlit>=1.39.0
 pytest>=8.0.0
+plotly
