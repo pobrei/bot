@@ -20,6 +20,14 @@ from src.market_data import MarketData
 from src.portfolio import PortfolioManager
 from src import database
 
+@st.cache_data(ttl=60)
+def get_portfolio_data():
+    """Cached CCXT data — polls Binance REST at most once per 60 seconds.
+    Prevents rate-limit bans (HTTP 429/418) on rapid Streamlit re-renders."""
+    md = MarketData()
+    pf = PortfolioManager(md.exchange)
+    return pf.fetch_balances(), pf.get_total_equity_usd()
+
 st.set_page_config(page_title="Binance Confluence Bot", layout="wide", page_icon="📈")
 
 st.title("📈 Binance Algorithmic Trading Bot")
@@ -30,8 +38,7 @@ tracker = PositionTracker()
 
 open_positions = tracker.get_open_positions()
 trade_history = tracker.get_trade_history()
-balances = portfolio.fetch_balances()
-total_equity = portfolio.get_total_equity_usd()
+balances, total_equity = get_portfolio_data()
 
 # Circuit breaker tracking
 snapshots = database.get_equity_snapshots(24)

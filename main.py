@@ -1,5 +1,6 @@
 import time
 import logging
+import ccxt
 from src.config import (
     SYMBOLS, 
     TIMEFRAME, 
@@ -19,7 +20,13 @@ from src import database
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def main():
+MAX_RESTART_ATTEMPTS = 5
+RESTART_BASE_DELAY = 30
+
+def main(attempt: int = 0):
+    if attempt >= MAX_RESTART_ATTEMPTS:
+        logger.critical(f"Bot failed {MAX_RESTART_ATTEMPTS} consecutive times. Halting permanently.")
+        return
     market_data = MarketData()
     strategy = Strategy()
     portfolio = PortfolioManager(market_data.exchange)
@@ -36,6 +43,11 @@ def main():
     logger.info(f"Timeframe: {TIMEFRAME}")
     logger.info("=" * 60)
     
+    # Bug 2 Fix: Record startup equity baseline so circuit breakers have a reference on first run
+    startup_equity = portfolio.get_total_equity_usd()
+    database.record_equity_snapshot(startup_equity)
+    logger.info(f"Startup equity baseline recorded: ${startup_equity:.2f}")
+
     try:
         while True:
             # Record current equity snapshot for drawdown tracking
@@ -121,8 +133,13 @@ def main():
             
     except KeyboardInterrupt:
         logger.info("Termination signal received. Shutting down gracefully.")
+    except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+        delay = RESTART_BASE_DELAY * (2 ** attempt)  # Exponential backoff: 30s, 60s, 120s...
+        logger.error(f"Exchange/Network error (attempt {attempt+1}/{MAX_RESTART_ATTEMPTS}): {e}. Restarting in {delay}s...")
+        time.sleep(delay)
+        main(attempt + 1)
     except Exception as e:
-        logger.error(f"Unexpected error in main loop: {e}")
+        logger.critical(f"Unexpected fatal error in main loop: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()

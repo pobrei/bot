@@ -76,6 +76,9 @@ class ExecutionManager:
                     return None
 
                 if self.dry_run:
+                    if final_cost < min_cost:
+                        logger.info(f"[DRY RUN] SELL skipped: dust amount {amount} {base} worth {final_cost:.4f} {quote} < min {min_cost} {quote}.")
+                        return None
                     fee = final_cost * 0.001
                     self.portfolio.simulate_trade(symbol, 'sell', amount, price, fee, quote)
                     logger.info(f"[DRY RUN] SELL {amount} {symbol} @ {price} | Value: {final_cost} {quote} | Est. Fee: {fee} {quote}")

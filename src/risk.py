@@ -41,9 +41,14 @@ class RiskEngine:
     def calculate_position_size(self, quote: str = 'USDC') -> float:
         """
         Calculates dynamic order size clamped to min notional and available balance.
+        Subtracts BNB fee reserve (~$3) from spendable capital per risk rules.
         """
+        BNB_RESERVE_USD = 3.0  # Reserved for exchange fee discounts per quantitative-risk-rules.md
         total_equity = self.portfolio.get_total_equity_usd()
         available_quote = self.portfolio.get_available_quote_balance(quote)
+        
+        # Deduct BNB reserve and a 0.1% fee buffer from spendable capital
+        spendable = max(0.0, available_quote - BNB_RESERVE_USD)
         
         # Max 33% of total equity
         target_size = total_equity * self.sizing_ratio
@@ -51,10 +56,10 @@ class RiskEngine:
         # Clamp to minimum notional
         size = max(target_size, self.min_notional)
         
-        # Ensure we have enough available balance (buffer 1% for fees)
-        if size * 1.01 > available_quote:
-            logger.warning(f"RiskEngine: Desired size {size:.2f} exceeds available {available_quote:.2f}")
-            size = available_quote / 1.01  # Leave room for fees
+        # Ensure we stay within spendable balance (buffer 0.1% for fees)
+        if size * 1.001 > spendable:
+            logger.warning(f"RiskEngine: Desired size {size:.2f} exceeds spendable {spendable:.2f} (after ${BNB_RESERVE_USD} BNB reserve)")
+            size = spendable / 1.001  # Leave room for fees
             
         return size
 
