@@ -1,0 +1,9 @@
+ccxt>=4.4.0
+pandas>=2.2.0
+pandas-ta-classic>=0.4.47
+python-dotenv>=1.0.0
+feedparser>=6.0.11
+vaderSentiment>=3.3.2
+mplfinance>=0.12.10b0
+streamlit>=1.39.0
+pytest>=8.0.0
