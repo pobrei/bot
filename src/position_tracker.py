@@ -14,9 +14,10 @@ from .notifications import send_webhook_alert
 logger = logging.getLogger(__name__)
 
 class PositionTracker:
-    def __init__(self):
+    def __init__(self, pos_file: Optional[str] = None, hist_file: Optional[str] = None):
         # Database is automatically initialized when imported
-        pass
+        self.pos_file = pos_file
+        self.hist_file = hist_file
 
     def get_open_positions(self) -> Dict[str, Any]:
         return database.get_open_positions()

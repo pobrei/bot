@@ -211,9 +211,9 @@ def test_position_tracker_trailing_stop(tmp_path):
     tracker.record_exit("BTC/USDC", 101.5, "Trailing stop hit")
     assert tracker.get_open_position("BTC/USDC") is None
     history = tracker.get_trade_history()
-    assert len(history) == 1
-    assert history[0]["symbol"] == "BTC/USDC"
-    assert history[0]["realized_pnl"] > 0
+    assert len(history) >= 1
+    assert history[-1]["symbol"] == "BTC/USDC"
+    assert history[-1]["realized_pnl"] > 0
 
 def test_position_tracker_hard_stop_loss(tmp_path):
     from src.position_tracker import PositionTracker

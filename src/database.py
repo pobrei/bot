@@ -68,6 +68,18 @@ def init_db():
                     balances_json TEXT
                 )
             ''')
+
+            # Cached market candles and indicators for interactive charting
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS market_candles (
+                    symbol TEXT,
+                    timeframe TEXT,
+                    data_json TEXT,
+                    regime TEXT,
+                    updated_at TEXT,
+                    PRIMARY KEY (symbol, timeframe)
+                )
+            ''')
             
             # Initialize kill_switch if it doesn't exist
             cursor.execute('''
@@ -257,6 +269,77 @@ def get_portfolio_state() -> Tuple[float, Dict[str, Any]]:
         logger.error(f"Error reading portfolio state: {e}")
     # Return defaults if nothing found
     return 30.0, {}
+
+def save_market_candles(symbol: str, timeframe: str, df: Any, regime: str = "UNKNOWN"):
+    """
+    Saves the latest OHLCV market candles and computed indicators to SQLite.
+    Decouples UI rendering completely from CCXT rate limits.
+    """
+    try:
+        import io
+        import pandas as pd
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return
+        
+        # Take the most recent 120 candles to keep DB footprint minimal (<50KB)
+        df_slice = df.tail(120).copy()
+        
+        # Keep only relevant market & indicator columns
+        cols = [c for c in df_slice.columns if c in [
+            'timestamp', 'open', 'high', 'low', 'close', 'volume', 
+            'EMA_12', 'EMA_26', 'RSI_14'
+        ] or any(c.startswith(p) for p in ['BBL', 'BBM', 'BBU', 'MACD', 'ADX', 'DMP', 'DMN'])]
+        
+        df_save = df_slice[cols] if cols else df_slice
+        data_json = df_save.to_json(orient='split')
+        now_str = datetime.now().isoformat()
+        
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO market_candles (symbol, timeframe, data_json, regime, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (symbol, timeframe, data_json, regime, now_str))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error caching market candles for {symbol}: {e}")
+
+def get_market_candles(symbol: str, timeframe: str = "1h") -> Optional[Tuple[Any, str, str]]:
+    """
+    Retrieves cached OHLCV market candles and computed indicators from SQLite.
+    Returns (df, regime, updated_at) or None.
+    """
+    try:
+        import io
+        import pandas as pd
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT data_json, regime, updated_at FROM market_candles WHERE symbol = ? AND timeframe = ?", 
+                (symbol, timeframe)
+            )
+            row = cursor.fetchone()
+            if row and row['data_json']:
+                df = pd.read_json(io.StringIO(row['data_json']), orient='split')
+                return df, row['regime'] or "UNKNOWN", row['updated_at']
+    except Exception as e:
+        logger.error(f"Error reading cached candles for {symbol}: {e}")
+    return None
+
+def get_cached_market_symbols() -> List[str]:
+    """
+    Returns list of all symbols currently cached in the database.
+    """
+    symbols = []
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT symbol FROM market_candles ORDER BY symbol ASC")
+            symbols = [row[0] for row in cursor.fetchall()]
+    except Exception as e:
+        logger.error(f"Error fetching cached symbols: {e}")
+    return symbols
 
 # Initialize DB on load
 init_db()

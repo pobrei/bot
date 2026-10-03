@@ -99,6 +99,9 @@ def main(attempt: int = 0):
                 regime = strategy.get_regime(symbol)
                 logger.info(f"[{symbol}] Signal: {signal} | Regime: {regime}")
                 
+                # Cache market candles and indicators to SQLite for interactive dashboard
+                database.save_market_candles(symbol, TIMEFRAME, df, regime)
+
                 # Generate candlestick chart for dashboard
                 plot_market_graph(symbol, df, TIMEFRAME)
                 

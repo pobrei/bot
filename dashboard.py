@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import glob
 import pandas as pd
@@ -17,6 +18,11 @@ from src.config import (
 )
 from src.position_tracker import PositionTracker
 from src import database
+from src.visualization import (
+    create_interactive_candlestick, 
+    create_equity_curve_chart, 
+    get_tradingview_widget_html
+)
 
 st.set_page_config(page_title="Binance Confluence Bot", layout="wide", page_icon="📈")
 
@@ -103,6 +109,11 @@ with col5:
 
 st.markdown("---")
 
+# Interactive 24h Equity Curve & Risk Boundaries
+with st.expander("📈 Interactive Portfolio Performance & Risk Boundaries", expanded=True):
+    fig_equity = create_equity_curve_chart(snapshots, total_equity, starting_capital=30.0)
+    st.plotly_chart(fig_equity, use_container_width=True)
+
 col_left, col_right = st.columns([1, 2])
 with col_left:
     st.subheader("🥧 Portfolio Breakdown")
@@ -114,6 +125,12 @@ with col_left:
     if pie_data:
         df_pie = pd.DataFrame(pie_data)
         fig = px.pie(df_pie, values='Amount', names='Asset', hole=0.4)
+        fig.update_layout(
+            paper_bgcolor='#0e1117',
+            plot_bgcolor='#131722',
+            font=dict(color='#D1D4DC'),
+            margin=dict(l=20, r=20, t=30, b=20)
+        )
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No balances available.")
@@ -150,31 +167,107 @@ if trade_history:
         'realized_pnl': f'PnL ({quote_sample})',
         'reason': 'Exit Reason'
     }, inplace=True)
-    st.dataframe(hist_df, use_container_width=True)
+    st.dataframe(hist_df, width='stretch')
 
 st.markdown("---")
-st.subheader("📊 Live Market Scans & Indicators")
-st.write("Real-time candlestick charts with EMA 12/26 and Bollinger overlays generated during scanning.")
 
-# Dynamically find all generated graph files
-graph_files = glob.glob(f"graphs/*_{TIMEFRAME}.png")
-if not graph_files:
-    # Fallback to configured symbols
-    graph_files = [f"graphs/{s.replace('/', '_')}_{TIMEFRAME}.png" for s in SYMBOLS]
+# ==========================================
+# INTERACTIVE MARKET CHARTS & SIGNALS
+# ==========================================
+st.subheader("📊 Live Interactive Market Charts & Signals")
+st.caption("Zero CCXT API quota consumption: Market data cached locally in SQLite by the bot engine, plus live TradingView streaming.")
 
-cols = st.columns(2)
-for idx, filepath in enumerate(sorted(graph_files)):
-    basename = os.path.basename(filepath)
-    symbol_display = basename.replace(f"_{TIMEFRAME}.png", "").replace("_", "/")
-    
-    col = cols[idx % 2]
-    with col:
-        st.write(f"### {symbol_display}")
-        if os.path.exists(filepath):
-            try:
-                img = Image.open(filepath)
-                st.image(img, width='stretch')
-            except Exception as e:
-                st.error(f"Error loading image: {e}")
+cached_symbols = database.get_cached_market_symbols()
+available_symbols = list(dict.fromkeys(cached_symbols + SYMBOLS))
+
+chart_mode = st.radio(
+    "Display Mode",
+    ["🎯 Focus View (Interactive Deep-Dive)", "🔲 Multi-Chart Grid (All Pairs)"],
+    horizontal=True
+)
+
+if chart_mode == "🎯 Focus View (Interactive Deep-Dive)":
+    c_sel, c_view = st.columns([2, 3])
+    with c_sel:
+        selected_symbol = st.selectbox("Select Asset", available_symbols, index=0)
+    with c_view:
+        view_source = st.radio(
+            "Chart Engine",
+            ["🤖 Bot Strategy Engine (Plotly)", "🌐 TradingView Terminal (Live Stream)"],
+            horizontal=True
+        )
+
+    candle_data = database.get_market_candles(selected_symbol, TIMEFRAME)
+
+    if view_source == "🤖 Bot Strategy Engine (Plotly)":
+        if candle_data is not None:
+            df_candles, regime, updated_at = candle_data
+            
+            # Extract indicator badges
+            curr = df_candles.iloc[-1]
+            c_price = curr['close']
+            ema12 = curr.get('EMA_12', None)
+            ema26 = curr.get('EMA_26', None)
+            rsi = curr.get('RSI_14', None)
+
+            # Metrics pills
+            mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
+            with mcol1:
+                st.metric("Latest Price", f"{c_price:,.4f} {quote_sample}")
+            with mcol2:
+                reg_icon = "🚀" if regime == "TRENDING" else ("↔️" if regime == "RANGING" else "⚙️")
+                st.metric("Regime", f"{reg_icon} {regime}")
+            with mcol3:
+                if ema12 is not None and ema26 is not None:
+                    ema_diff = ema12 - ema26
+                    ema_status = "🟢 Bullish" if ema_diff > 0 else "🔴 Bearish"
+                    st.metric("EMA Trend", ema_status, f"{ema_diff:+.2f}")
+                else:
+                    st.metric("EMA Trend", "Calculating...")
+            with mcol4:
+                if rsi is not None:
+                    rsi_status = "⚠️ Overbought" if rsi > 70 else ("🟢 Oversold" if rsi < 30 else "⚪ Neutral")
+                    st.metric("RSI (14)", f"{rsi:.1f}", rsi_status)
+                else:
+                    st.metric("RSI (14)", "Calculating...")
+            with mcol5:
+                st.metric("Last Scan", updated_at.split('T')[1][:8] if 'T' in updated_at else updated_at)
+
+            # Render Plotly interactive chart
+            fig = create_interactive_candlestick(selected_symbol, df_candles, regime, TIMEFRAME)
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True, 'scrollZoom': True})
         else:
-            st.info(f"Scanning market data for {symbol_display}...")
+            # Fallback to static graph if SQLite cache has not yet run for this symbol
+            safe_sym = selected_symbol.replace('/', '_')
+            static_file = f"graphs/{safe_sym}_{TIMEFRAME}.png"
+            if os.path.exists(static_file):
+                st.info(f"Showing static snapshot for {selected_symbol}. Interactive data will populate on the next bot scan cycle.")
+                st.image(Image.open(static_file), width='stretch')
+            else:
+                st.info(f"Waiting for first scan cycle of {selected_symbol}... Please check back in a few seconds.")
+    else:
+        # Live TradingView Web Terminal
+        tv_html = get_tradingview_widget_html(selected_symbol, TIMEFRAME, height=540)
+        components.html(tv_html, height=555)
+
+else:
+    # Multi-Chart Grid View
+    cols = st.columns(2)
+    for idx, sym in enumerate(available_symbols):
+        col = cols[idx % 2]
+        with col:
+            st.markdown(f"#### {sym}")
+            candle_data = database.get_market_candles(sym, TIMEFRAME)
+            if candle_data is not None:
+                df_candles, regime, _ = candle_data
+                fig = create_interactive_candlestick(sym, df_candles, regime, TIMEFRAME)
+                # Keep height compact for grid view
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            else:
+                safe_sym = sym.replace('/', '_')
+                static_file = f"graphs/{safe_sym}_{TIMEFRAME}.png"
+                if os.path.exists(static_file):
+                    st.image(Image.open(static_file), width='stretch')
+                else:
+                    st.info(f"Scanning market data for {sym}...")
