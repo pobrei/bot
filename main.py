@@ -52,6 +52,8 @@ def main(attempt: int = 0):
         while True:
             # Record current equity snapshot for drawdown tracking
             current_equity = portfolio.get_total_equity_usd()
+            balances = portfolio.fetch_balances()
+            database.save_portfolio_state(current_equity, balances)
             database.record_equity_snapshot(current_equity)
 
             # Check Kill-Switch

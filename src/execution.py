@@ -17,6 +17,7 @@ class ExecutionManager:
             base, quote = symbol.split('/') if '/' in symbol else (symbol, 'USD')
             market = self.exchange.market(symbol)
             min_cost = market.get('limits', {}).get('cost', {}).get('min', 5.0)
+            min_qty = market.get('limits', {}).get('amount', {}).get('min', 0.0)
             
             ticker = self.exchange.fetch_ticker(symbol)
             price = ticker['last']
@@ -35,7 +36,12 @@ class ExecutionManager:
                 amount = amount_usd / price
                 amount = float(self.exchange.amount_to_precision(symbol, amount))
                 
-                # Re-check cost after precision adjustment
+                # Check minQty LOT_SIZE filter
+                if amount < min_qty:
+                    logger.warning(f"Calculated amount {amount} is below minQty {min_qty}. Order rejected.")
+                    return None
+
+                # Re-check cost after precision adjustment for MIN_NOTIONAL filter
                 final_cost = amount * price
                 if final_cost < min_cost:
                     logger.warning(f"Precision-adjusted cost {final_cost} {quote} is below minimum {min_cost} {quote}. Order rejected.")
@@ -67,9 +73,14 @@ class ExecutionManager:
                     balances = self.portfolio.fetch_balances()
                     avail_base = balances.get(base, {}).get('free', 0.0) if isinstance(balances, dict) else 0.0
                     amount = float(self.exchange.amount_to_precision(symbol, avail_base))
+                    
+                    if amount < min_qty:
+                        logger.info(f"No active position to SELL for {symbol} (holding {amount} {base} < minQty {min_qty}). Skipping.")
+                        return None
+                        
                     final_cost = amount * price
                     if final_cost < min_cost:
-                        logger.info(f"No active position to SELL for {symbol} (holding {avail_base} {base} worth < {min_cost} {quote}). Skipping.")
+                        logger.info(f"No active position to SELL for {symbol} (holding {avail_base} {base} worth < minNotional {min_cost} {quote}). Skipping.")
                         return None
                 except Exception as e:
                     logger.warning(f"Could not fetch balance for sell pre-check: {e}")

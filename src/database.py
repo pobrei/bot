@@ -1,7 +1,7 @@
 import sqlite3
 import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,15 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS bot_state (
                     key TEXT PRIMARY KEY,
                     value TEXT
+                )
+            ''')
+            
+            # Decoupled portfolio state table for the Dashboard
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS portfolio_state (
+                    id INTEGER PRIMARY KEY,
+                    total_equity REAL,
+                    balances_json TEXT
                 )
             ''')
             
@@ -222,6 +231,32 @@ def get_equity_snapshots(hours: int = 24) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Error reading equity snapshots: {e}")
     return snapshots
+
+def save_portfolio_state(total_equity: float, balances: Dict[str, Any]):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO portfolio_state (id, total_equity, balances_json)
+                VALUES (1, ?, ?)
+            ''', (total_equity, json.dumps(balances)))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error saving portfolio state: {e}")
+
+def get_portfolio_state() -> Tuple[float, Dict[str, Any]]:
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT total_equity, balances_json FROM portfolio_state WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                return float(row['total_equity']), json.loads(row['balances_json'])
+    except Exception as e:
+        logger.error(f"Error reading portfolio state: {e}")
+    # Return defaults if nothing found
+    return 30.0, {}
 
 # Initialize DB on load
 init_db()
