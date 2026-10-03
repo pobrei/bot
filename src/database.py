@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import json
 import logging
@@ -6,11 +7,18 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "trading_bot.db"
+DB_PATH = os.getenv("DB_PATH", "trading_bot.db")
+
+def get_db_path() -> str:
+    return os.getenv("DB_PATH", DB_PATH)
+
+def set_db_path(path: str):
+    global DB_PATH
+    DB_PATH = path
 
 def init_db():
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             
             # Active positions table
@@ -92,7 +100,7 @@ def init_db():
 
 def get_kill_switch() -> bool:
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM bot_state WHERE key = 'kill_switch'")
             row = cursor.fetchone()
@@ -105,7 +113,7 @@ def get_kill_switch() -> bool:
 
 def set_kill_switch(is_killed: bool):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             val = 'true' if is_killed else 'false'
             cursor.execute("UPDATE bot_state SET value = ? WHERE key = 'kill_switch'", (val,))
@@ -116,7 +124,7 @@ def set_kill_switch(is_killed: bool):
 def get_open_positions() -> Dict[str, Any]:
     positions = {}
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM positions")
@@ -136,7 +144,7 @@ def get_open_positions() -> Dict[str, Any]:
 
 def get_open_position(symbol: str) -> Optional[Dict[str, Any]]:
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM positions WHERE symbol = ?", (symbol,))
@@ -157,7 +165,7 @@ def get_open_position(symbol: str) -> Optional[Dict[str, Any]]:
 
 def upsert_position(pos: Dict[str, Any]):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO positions (symbol, entry_price, highest_price, amount, quote, trailing_active, entry_time)
@@ -175,7 +183,7 @@ def upsert_position(pos: Dict[str, Any]):
 
 def remove_position(symbol: str):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
             conn.commit()
@@ -185,7 +193,7 @@ def remove_position(symbol: str):
 def get_trade_history() -> List[Dict[str, Any]]:
     history = []
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trade_history ORDER BY id ASC")
@@ -197,7 +205,7 @@ def get_trade_history() -> List[Dict[str, Any]]:
 
 def insert_trade_history(trade: Dict[str, Any]):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO trade_history (symbol, entry_time, exit_time, entry_price, exit_price, amount, quote, pnl_pct, realized_pnl, reason)
@@ -214,7 +222,7 @@ def insert_trade_history(trade: Dict[str, Any]):
 def record_equity_snapshot(equity: float):
     now_str = datetime.now().isoformat()
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO equity_snapshots (timestamp, equity)
@@ -227,7 +235,7 @@ def record_equity_snapshot(equity: float):
 def get_equity_snapshots(hours: int = 24) -> List[Dict[str, Any]]:
     snapshots = []
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             # Simple approach: fetch all and filter in Python, or use datetime in SQLite
@@ -246,7 +254,7 @@ def get_equity_snapshots(hours: int = 24) -> List[Dict[str, Any]]:
 
 def save_portfolio_state(total_equity: float, balances: Dict[str, Any]):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT OR REPLACE INTO portfolio_state (id, total_equity, balances_json)
@@ -258,7 +266,7 @@ def save_portfolio_state(total_equity: float, balances: Dict[str, Any]):
 
 def get_portfolio_state() -> Tuple[float, Dict[str, Any]]:
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT total_equity, balances_json FROM portfolio_state WHERE id = 1")
@@ -294,7 +302,7 @@ def save_market_candles(symbol: str, timeframe: str, df: Any, regime: str = "UNK
         data_json = df_save.to_json(orient='split')
         now_str = datetime.now().isoformat()
         
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT OR REPLACE INTO market_candles (symbol, timeframe, data_json, regime, updated_at)
@@ -312,7 +320,7 @@ def get_market_candles(symbol: str, timeframe: str = "1h") -> Optional[Tuple[Any
     try:
         import io
         import pandas as pd
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
@@ -333,7 +341,7 @@ def get_cached_market_symbols() -> List[str]:
     """
     symbols = []
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT symbol FROM market_candles ORDER BY symbol ASC")
             symbols = [row[0] for row in cursor.fetchall()]
