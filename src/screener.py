@@ -34,15 +34,23 @@ class TopMoverScreener:
                     continue
                 if symbol in base_basket:
                     continue
-                # Exclude leveraged / down / up / bear / bull tokens
-                if any(bad in symbol for bad in ['UP/', 'DOWN/', 'BULL/', 'BEAR/']):
+                parts = symbol.split('/')
+                if len(parts) != 2:
+                    continue
+                base, quote = parts
+                # Exclude stablecoin-to-stablecoin pairs
+                if base in ['USDC', 'USDT', 'FDUSD', 'BUSD', 'DAI', 'TUSD', 'EUR', 'AEUR', 'EURI']:
+                    continue
+                # Exclude leveraged / down / up / bear / bull / leveraged ETF tokens
+                leveraged_patterns = ['UP', 'DOWN', 'BULL', 'BEAR', '3L', '3S', '5L', '5S']
+                if any(base.endswith(bad) for bad in leveraged_patterns) or any(bad in symbol for bad in ['UP/', 'DOWN/', 'BULL/', 'BEAR/']):
                     continue
                 
                 vol = ticker.get('quoteVolume') or 0
                 pct = ticker.get('percentage') or 0
                 
-                # Minimum $50,000 24h quote volume to ensure ample liquidity
-                if vol >= 50000 and pct > 0:
+                # Minimum $5,000,000 24h quote volume to ensure institutional liquidity and healthy momentum (1% to 40% gain)
+                if vol >= 5000000 and 1.0 <= pct <= 40.0:
                     candidates.append({
                         'symbol': symbol,
                         'change_24h': pct,

@@ -23,27 +23,26 @@ class TestRiskExecution(unittest.TestCase):
     def test_sizing_tight_quote(self):
         # Scenario: Tight quote currency, checking formula logic
         # total_equity = 30, free_quote = 15, active_pos = 1
-        # Formula: min(max(30*0.33, 5.50), (15 - 3) / (2 - 1)) = min(9.9, 12) = 9.9
+        # Formula: target is CAPITAL_PER_TRADE ($6.50), clamped to max 25% equity ($7.50) and slot quote ($12.0) -> $6.50
         self.portfolio.get_total_equity_usd = MagicMock(return_value=30.0)
         self.portfolio.get_available_quote_balance = MagicMock(return_value=15.0)
         
         size = self.risk_engine.calculate_position_size(active_positions_count=1)
-        self.assertAlmostEqual(size, 9.9, places=2)
+        self.assertAlmostEqual(size, 6.50, places=2)
 
-    def test_sizing_max_equity(self):
-        # Scenario: Lots of free quote, sizes clamp to 33% total equity
-        # total_equity = 100, free_quote = 100, active_pos = 0
-        # Formula: min(max(100*0.33, 5.50), (100 - 3) / 2) = min(33.0, 48.5) = 33.0
-        self.portfolio.get_total_equity_usd = MagicMock(return_value=100.0)
-        self.portfolio.get_available_quote_balance = MagicMock(return_value=100.0)
+    def test_sizing_capped_to_25_pct_equity(self):
+        # Scenario: Low equity, 25% max equity cap triggers when CAPITAL_PER_TRADE exceeds 25% of equity
+        # total_equity = 24.0 (25% is 6.00), free_quote = 20.0
+        self.portfolio.get_total_equity_usd = MagicMock(return_value=24.0)
+        self.portfolio.get_available_quote_balance = MagicMock(return_value=20.0)
         
         size = self.risk_engine.calculate_position_size(active_positions_count=0)
-        self.assertAlmostEqual(size, 33.0, places=2)
+        self.assertAlmostEqual(size, 6.00, places=2)
 
     def test_rejection_insufficient_quote(self):
-        # Scenario: Available quote is below min_notional (5.50) after BNB reserve
+        # Scenario: Available quote is below min_notional (6.00) after BNB reserve
         # total_equity = 30, free_quote = 6
-        # Formula: min(max(30*0.33, 5.50), (6 - 3) / 2) = min(9.9, 1.5) = 1.5
+        # Formula: (6 - 3) / 2 = 1.5 < 6.00
         self.portfolio.get_total_equity_usd = MagicMock(return_value=30.0)
         self.portfolio.get_available_quote_balance = MagicMock(return_value=6.0)
         

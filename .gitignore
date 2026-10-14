@@ -15,10 +15,16 @@ __pycache__/
 .env.*.local
 !.env.example
 
-# Local State, DBs & Graphs
+# Local State, DBs, Logs & Locks
 positions.json
 trade_history.json
-trading_bot.db
+trading_bot.db*
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.pid
+*.lock
 graphs/
 *.png
 

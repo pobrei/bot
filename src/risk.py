@@ -1,7 +1,16 @@
 import logging
-from typing import Tuple
+import time
+from typing import Tuple, Optional
+from datetime import datetime
+from .config import CAPITAL_PER_TRADE
 from .portfolio import PortfolioManager
-from .database import get_trade_history, get_equity_snapshots, set_kill_switch
+from .database import (
+    get_trade_history, 
+    get_equity_snapshots, 
+    set_kill_switch, 
+    is_symbol_in_cooldown, 
+    get_last_trade
+)
 
 logger = logging.getLogger(__name__)
 
@@ -9,10 +18,16 @@ class RiskEngine:
     def __init__(self, portfolio: PortfolioManager):
         self.portfolio = portfolio
         self.max_positions = 2
-        self.sizing_ratio = 0.33
-        self.min_notional = 5.50
+        self.sizing_ratio = 0.25  # Max 25% equity per position to limit stop-loss downside to ~$0.16
+        self.min_notional = 6.00
         self.equity_floor = 20.00
         self.max_drawdown_pct = 5.0
+
+    def sort_buy_signals(self, signals: list) -> list:
+        """
+        Sorts concurrent BUY signals by priority_score descending.
+        """
+        return sorted(signals, key=lambda x: x.get('priority_score', 0.0), reverse=True)
 
     def check_circuit_breakers(self) -> Tuple[bool, str]:
         """
@@ -41,24 +56,37 @@ class RiskEngine:
 
     def calculate_position_size(self, active_positions_count: int, quote: str = 'USDC') -> float:
         """
-        Calculates dynamic order size clamped to min notional and available balance.
+        Calculates dynamic order size clamped to min notional, CAPITAL_PER_TRADE, and available balance.
         Subtracts BNB fee reserve (~$3) from spendable capital per risk rules.
         """
-        BNB_RESERVE_USD = 3.0  # Reserved for exchange fee discounts per quantitative-risk-rules.md
         total_equity = self.portfolio.get_total_equity_usd()
         available_quote = self.portfolio.get_available_quote_balance(quote)
         
-        # Deduct BNB reserve from spendable quote
-        spendable = max(0.0, available_quote - BNB_RESERVE_USD)
-        
-        # Formula: min(max(total_equity * 0.33, 5.50), (available_free_quote - bnb_reserve_usd) / (2 - active_positions))
+        # Check if actual BNB is already held to cover fee reserve ($3)
+        bnb_reserve_needed = 3.0
+        try:
+            balances = self.portfolio.fetch_balances()
+            if isinstance(balances, dict) and 'BNB' in balances:
+                bnb_free = balances.get('BNB', {}).get('free', 0.0)
+                if isinstance(bnb_free, (int, float)) and bnb_free >= 0.005:  # ~0.005 BNB is ~$3.00 at $600/BNB
+                    bnb_reserve_needed = 0.0
+        except Exception:
+            pass
+
+        # Deduct needed BNB reserve from spendable quote
+        spendable = max(0.0, available_quote - bnb_reserve_needed)
         available_slots = max(1, self.max_positions - active_positions_count)
         allocation_per_slot = spendable / available_slots
         
-        # Max 33% of total equity
-        target_size = max(total_equity * self.sizing_ratio, self.min_notional)
+        # Sizing rules:
+        # 1. Base target is CAPITAL_PER_TRADE (e.g. 6.50 USDC)
+        # 2. Hard cap per trade: 25% of total account equity (e.g. on $30 equity, max $7.50)
+        # 3. Minimum notional: self.min_notional ($6.00)
+        configured_size = CAPITAL_PER_TRADE if (CAPITAL_PER_TRADE and CAPITAL_PER_TRADE > 0) else 6.50
+        max_account_risk = max(self.min_notional, total_equity * self.sizing_ratio)
+        target_size = min(max(configured_size, self.min_notional), max_account_risk)
         
-        # Final effective size
+        # Final effective size cannot exceed available quote in slot
         size = min(target_size, allocation_per_slot)
         
         if size < self.min_notional:
@@ -66,11 +94,33 @@ class RiskEngine:
             
         return size
 
-    def validate_entry(self, symbol: str, active_positions_count: int, quote: str = 'USDC') -> Tuple[bool, str, float]:
+    def validate_entry(self, symbol: str, active_positions_count: int, quote: str = 'USDC', current_price: float = 0.0) -> Tuple[bool, str, float]:
         """
         Validates if we can enter a new position and returns the allowed size.
         Returns (is_valid, reason, size_usd).
         """
+        is_cool, cool_reason = is_symbol_in_cooldown(symbol)
+        if is_cool:
+            return False, cool_reason, 0.0
+
+        # Anti-Chasing / Anti-Re-Entry Guard:
+        # Prevent re-entering at a higher price than the recent exit within 4 hours (e.g., chasing top of wicks)
+        if current_price > 0.0:
+            last_trade = get_last_trade(symbol)
+            if last_trade:
+                last_exit_time_str = last_trade.get('exit_time')
+                last_exit_price = last_trade.get('exit_price', 0.0)
+                if last_exit_time_str and last_exit_price > 0.0:
+                    try:
+                        exit_dt = datetime.strptime(last_exit_time_str, "%Y-%m-%d %H:%M:%S")
+                        elapsed_sec = (datetime.now() - exit_dt).total_seconds()
+                    except Exception:
+                        elapsed_sec = 0.0
+                    
+                    if 0 <= elapsed_sec < 14400.0:  # Within 4 hours of exit
+                        if current_price >= last_exit_price:
+                            return False, f"Anti-chasing guard: Current price ({current_price:.4f}) >= last exit ({last_exit_price:.4f}) within 4h. Wait for pullback.", 0.0
+
         if active_positions_count >= self.max_positions:
             return False, f"Max concurrent positions reached ({self.max_positions})", 0.0
             
@@ -79,6 +129,11 @@ class RiskEngine:
             return False, f"Circuit Breaker Triggered: {cb_reason}", 0.0
             
         size = self.calculate_position_size(active_positions_count, quote)
+        if size < self.min_notional:
+            # Check if autonomous rebalancing can replenish quote from excess BNB
+            if self.portfolio.auto_rebalance_quote(min_quote_required=self.min_notional):
+                size = self.calculate_position_size(active_positions_count, quote)
+
         if size < self.min_notional:
             return False, f"Available quote insufficient to meet min notional {self.min_notional}", 0.0
             

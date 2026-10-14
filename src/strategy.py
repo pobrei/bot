@@ -2,114 +2,117 @@ import pandas as pd
 import pandas_ta_classic as ta
 import logging
 
-from .sentiment import SentimentAnalyzer
+from .config import MIN_ATR_RATIO
 
 logger = logging.getLogger(__name__)
 
 class Strategy:
     def __init__(self):
-        self.sentiment_analyzer = SentimentAnalyzer()
         self.last_regimes = {}
 
     def get_regime(self, symbol: str) -> str:
         return self.last_regimes.get(symbol, "UNKNOWN")
 
-    def evaluate(self, symbol: str, df: pd.DataFrame) -> str:
+    def evaluate(self, symbol: str, df: pd.DataFrame, min_atr_ratio: float = None) -> dict:
+        result = {'signal': 'HOLD', 'source': None, 'priority_score': 0.0}
         if df.empty or len(df) < 27:
-            return 'HOLD'
+            return result
             
-        # Calculate Core Indicators
+        # Core Indicators
         df['EMA_12'] = ta.ema(df['close'], length=12)
         df['EMA_26'] = ta.ema(df['close'], length=26)
         df['RSI_14'] = ta.rsi(df['close'], length=14)
+        df['Volume_SMA'] = ta.sma(df['volume'], length=20)
+        df['ATR_14'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
-        # MACD
-        macd = ta.macd(df['close'])
-        if macd is not None and not macd.empty:
-            df = df.join(macd)
-            macd_line = df.columns[-3]
-            macd_signal = df.columns[-1]
-        else:
-            macd_line, macd_signal = None, None
-            
-        # Bollinger Bands
-        bbands = ta.bbands(df['close'])
+        # Bollinger Bands - in-place assignment to preserve columns for caller and DB
+        bbands = ta.bbands(df['close'], length=20, std=2.0)
+        bbl, bbm, bbu = None, None, None
         if bbands is not None and not bbands.empty:
-            df = df.join(bbands)
-            bbl = df.columns[-5] # Lower Band
-            bbu = df.columns[-3] # Upper Band
-        else:
-            bbl, bbu = None, None
+            for col in bbands.columns:
+                df[col] = bbands[col]
+            bbl = next((c for c in bbands.columns if c.startswith('BBL')), None)
+            bbm = next((c for c in bbands.columns if c.startswith('BBM')), None)
+            bbu = next((c for c in bbands.columns if c.startswith('BBU')), None)
 
-        # ADX Regime Detection
+        # Donchian High
+        df['Donchian_High_20'] = df['high'].rolling(20).max().shift(1)
+
+        # ADX Regime Detection - in-place assignment
         adx_val = None
-        dmp_val = None
-        dmn_val = None
-        regime = "TRENDING"  # Default fallback
-
+        regime = "RANGING"  # Default
+        
         if 'high' in df.columns and 'low' in df.columns:
             try:
                 adx_df = ta.adx(high=df['high'], low=df['low'], close=df['close'], length=14)
                 if adx_df is not None and not adx_df.empty:
-                    if 'ADX_14' in adx_df.columns and not adx_df['ADX_14'].isna().iloc[-1]:
-                        adx_val = float(adx_df['ADX_14'].iloc[-1])
-                        dmp_val = float(adx_df['DMP_14'].iloc[-1])
-                        dmn_val = float(adx_df['DMN_14'].iloc[-1])
-                        
+                    for col in adx_df.columns:
+                        df[col] = adx_df[col]
+                    if 'ADX_14' in df.columns and not pd.isna(df['ADX_14'].iloc[-1]):
+                        adx_val = float(df['ADX_14'].iloc[-1])
                         if adx_val >= 25.0:
                             regime = "TRENDING"
-                        elif adx_val < 20.0:
-                            regime = "RANGING"
-                        else:
-                            regime = "TRANSITIONAL"
             except Exception as e:
                 logger.debug(f"ADX calculation fallback: {e}")
-
+                
         self.last_regimes[symbol] = regime
 
-        if df['EMA_12'].isna().iloc[-1] or df['EMA_26'].isna().iloc[-1] or df['RSI_14'].isna().iloc[-1]:
-            return 'HOLD'
-
-        curr = df.iloc[-1]
         prev = df.iloc[-2]
+        curr = df.iloc[-1]
+        close = curr['close']
         
-        # Get sentiment
-        sentiment = self.sentiment_analyzer.get_market_sentiment(symbol)
-        
-        adx_str = f", ADX: {adx_val:.1f} [{regime}]" if adx_val is not None else f" [{regime}]"
-        logger.info(f"[{symbol}] EMA_12: {curr['EMA_12']:.2f}, EMA_26: {curr['EMA_26']:.2f}, RSI: {curr['RSI_14']:.2f}{adx_str}, Sentiment: {sentiment:.2f}")
-        
-        fast_cross_above = prev['EMA_12'] <= prev['EMA_26'] and curr['EMA_12'] > curr['EMA_26']
-        fast_cross_below = prev['EMA_12'] >= prev['EMA_26'] and curr['EMA_12'] < curr['EMA_26']
-        rsi = curr['RSI_14']
+        # Volatility Filter
+        effective_hurdle = min_atr_ratio if min_atr_ratio is not None else MIN_ATR_RATIO
+        if pd.isna(curr.get('ATR_14')) or (curr['ATR_14'] / close) < effective_hurdle:
+            return result
 
-        is_bullish = False
-        is_bearish = False
-
-        if regime == "TRENDING":
-            # TRENDING REGIME: Prioritize strong directional continuation
-            # Fast EMA crosses above slow, directional index DMP > DMN, RSI momentum 45-72
-            directional_ok = (dmp_val is None or dmn_val is None or dmp_val > dmn_val)
-            is_bullish = fast_cross_above and directional_ok and (45 <= rsi <= 72) and sentiment > -0.15
-            is_bearish = fast_cross_below or rsi > 75 or sentiment < -0.4
-
-        elif regime == "RANGING":
-            # RANGING / CHOPPY REGIME: Avoid crossover traps! Focus on Mean Reversion
-            # Buy lower Bollinger Band dip with low RSI, exit at upper band
-            bounce_lower_bb = (bbl and curr['close'] <= curr[bbl]) or (rsi < 35)
-            is_bullish = bounce_lower_bb and sentiment > -0.25
-            is_bearish = (bbu and curr['close'] >= curr[bbu]) or rsi > 65 or sentiment < -0.4
-
-        else:
-            # TRANSITIONAL REGIME: Standard multi-indicator confluence
-            is_bullish = fast_cross_above and (50 <= rsi <= 70) and sentiment > -0.1
-            if bbl and curr['close'] <= curr[bbl] and sentiment > 0.2 and rsi < 40:
-                is_bullish = True
-            is_bearish = rsi > 75 or fast_cross_below or sentiment < -0.5
-        
-        if is_bullish:
-            return 'BUY'
-        elif is_bearish:
-            return 'SELL'
+        # Mean Reversion (ADX < 25)
+        if regime == "RANGING":
+            if bbl and close <= curr[bbl] and curr.get('RSI_14', 50) <= 32:
+                result['signal'] = 'BUY'
+                result['source'] = 'mean_reversion'
+                result['priority_score'] = max(0.0, (32.0 - curr.get('RSI_14', 50)) / 32.0)
+            elif (bbm and close >= curr[bbm]) or curr.get('RSI_14', 50) >= 65:
+                result['signal'] = 'SELL'
+                result['source'] = 'mean_reversion'
+                
+        # Momentum Breakout & Trend Confluence (ADX >= 25)
+        elif regime == "TRENDING":
+            curr_vr = curr['volume'] / curr['Volume_SMA'] if curr.get('Volume_SMA', 0) > 0 else 0
+            prev_vr = prev['volume'] / prev['Volume_SMA'] if prev.get('Volume_SMA', 0) > 0 else 0
+            vol_ratio = max(curr_vr, prev_vr)
+            candle_range = curr['high'] - curr['low']
+            close_pos = (close - curr['low']) / candle_range if candle_range > 0 else 0
             
-        return 'HOLD'
+            # 1. Breakout setup
+            # Anti-exhaustion filter: reject blow-off climaxes (RSI > 74 or extended > 2.8 ATR from EMA12)
+            rsi_curr = curr.get('RSI_14', 50)
+            atr_val = curr.get('ATR_14', 0)
+            ema12_dist = (close - curr.get('EMA_12', close)) if 'EMA_12' in curr else 0
+            is_exhausted = (rsi_curr > 74.0) or (atr_val > 0 and ema12_dist > 2.8 * atr_val)
+
+            if close > curr.get('Donchian_High_20', float('inf')) and vol_ratio >= 2.0 and close_pos >= 0.75 and not is_exhausted:
+                result['signal'] = 'BUY'
+                result['source'] = 'breakout'
+                result['priority_score'] = min(1.0, (vol_ratio - 2.0) / 3.0)
+            # 2. Trend Pullback setup (EMA trend alignment + upward momentum recovery)
+            elif curr.get('EMA_12', 0) > curr.get('EMA_26', 0) and close >= curr.get('EMA_12', 0):
+                rsi_curr = curr.get('RSI_14', 50)
+                rsi_prev = prev.get('RSI_14', 50)
+                is_green_and_higher = (close >= curr.get('open', close)) and (close > prev['close'])
+                if 45.0 <= rsi_curr <= 68.0 and rsi_curr > rsi_prev and is_green_and_higher:
+                    result['signal'] = 'BUY'
+                    result['source'] = 'breakout'
+                    result['priority_score'] = (adx_val or 25.0) * 1.5
+                
+        # Dynamic Price Spectrums
+        atr = curr.get('ATR_14', 0)
+        if atr > 0:
+            buy_floor = min(curr[bbl], close - 0.75 * atr) if bbl else close - 0.75 * atr
+            result['spectrum_buy'] = (buy_floor, close + 0.15 * atr)
+            result['spectrum_sell_1'] = (close + 1.2 * atr, close + 1.8 * atr)
+            result['spectrum_sell_2'] = (max(curr[bbu], close + 2.2 * atr) if bbu else close + 2.2 * atr, close + 2.8 * atr)
+            result['invalidation'] = buy_floor - 1.0 * atr
+
+        return result
+

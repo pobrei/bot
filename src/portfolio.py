@@ -16,6 +16,8 @@ class PortfolioManager:
             'USDT': {'free': 30.0, 'used': 0.0, 'total': 30.0},
             'BNB':  {'free': 0.005, 'used': 0.0, 'total': 0.005} # Simulated $3 BNB reserve
         }
+        self.ticker_cache = {}
+        self._last_known_equity = 30.0
 
     def fetch_balances(self) -> Dict[str, Dict[str, float]]:
         if DRY_RUN:
@@ -48,15 +50,29 @@ class PortfolioManager:
                     # This fetches one by one which is ok for a small whitelist.
                     ticker = self.exchange.fetch_ticker(symbol)
                     price = ticker.get('last', 0.0)
+                    self.ticker_cache[symbol] = price
                     total_usd += amount * price
-                except:
-                    # Fallback to USDT
+                except Exception as e:
+                    # Fallback to cache, then USDT pair, then cache
+                    if symbol in self.ticker_cache:
+                        total_usd += amount * self.ticker_cache[symbol]
+                        continue
                     try:
-                        ticker = self.exchange.fetch_ticker(f"{asset}/USDT")
+                        usdt_symbol = f"{asset}/USDT"
+                        ticker = self.exchange.fetch_ticker(usdt_symbol)
                         price = ticker.get('last', 0.0)
+                        self.ticker_cache[usdt_symbol] = price
                         total_usd += amount * price
-                    except:
-                        pass
+                    except Exception as inner_e:
+                        if f"{asset}/USDT" in self.ticker_cache:
+                            total_usd += amount * self.ticker_cache[f"{asset}/USDT"]
+
+        if total_usd > 0:
+            self._last_known_equity = total_usd
+        elif self._last_known_equity > 0:
+            logger.warning(f"Calculated zero equity from balances. Falling back to last known equity: ${self._last_known_equity:.2f}")
+            return self._last_known_equity
+
         return total_usd
 
     def get_available_quote_balance(self, quote: str = 'USDC') -> float:
@@ -95,3 +111,41 @@ class PortfolioManager:
             self.dry_run_state[base]['total'] -= amount
             self.dry_run_state[quote]['free'] += (cost - fee)
             self.dry_run_state[quote]['total'] += (cost - fee)
+
+    def auto_rebalance_quote(self, min_quote_required: float = 6.0, target_replenish: float = 15.0) -> bool:
+        """
+        If free quote currency (USDC) is below min_quote_required,
+        automatically checks if there is excess unmanaged BNB (> $8 worth)
+        and sells just enough into quote currency to replenish capital.
+        """
+        if DRY_RUN:
+            return False
+            
+        try:
+            balances = self.fetch_balances()
+            free_quote = balances.get('USDC', {}).get('free', 0.0)
+            if free_quote >= min_quote_required:
+                return False
+                
+            free_bnb = balances.get('BNB', {}).get('free', 0.0)
+            ticker = self.exchange.fetch_ticker('BNB/USDC')
+            bnb_price = ticker.get('last', 0.0)
+            if not bnb_price or bnb_price <= 0:
+                return False
+                
+            bnb_value_usd = free_bnb * bnb_price
+            FEE_RESERVE_USD = 5.0  # Keep at least $5 of BNB for Binance trading fee discounts
+            available_bnb_usd = bnb_value_usd - FEE_RESERVE_USD
+            
+            if available_bnb_usd >= min_quote_required:
+                needed_usd = min(target_replenish, available_bnb_usd)
+                amount_bnb = float(self.exchange.amount_to_precision('BNB/USDC', needed_usd / bnb_price))
+                if amount_bnb >= 0.001 and (amount_bnb * bnb_price) >= 5.0:
+                    logger.info(f"[AUTO-REBALANCE] Rebalancing {amount_bnb} BNB to USDC (~${amount_bnb * bnb_price:.2f}) to replenish quote balance...")
+                    order = self.exchange.create_market_sell_order('BNB/USDC', amount_bnb)
+                    logger.info(f"[AUTO-REBALANCE] Order filled: {order.get('id')}")
+                    return True
+        except Exception as e:
+            logger.warning(f"[AUTO-REBALANCE] Failed to auto-rebalance: {e}")
+        return False
+

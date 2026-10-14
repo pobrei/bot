@@ -8,114 +8,118 @@ from src.execution import ExecutionManager
 def make_series(last_prev, last_curr):
     return pd.Series([0.0] * 28 + [last_prev, last_curr])
 
-@patch('src.strategy.ta.bbands')
-@patch('src.strategy.ta.macd')
-@patch('src.strategy.SentimentAnalyzer')
-@patch('src.strategy.ta.ema')
-@patch('src.strategy.ta.rsi')
-def test_strategy_buy_signal(mock_rsi, mock_ema, mock_sentiment, mock_macd, mock_bbands):
-    mock_sentiment_instance = Mock()
-    mock_sentiment_instance.get_market_sentiment.return_value = 0.0
-    mock_sentiment.return_value = mock_sentiment_instance
-    mock_macd.return_value = None
-    mock_bbands.return_value = None
-    
+def test_strategy_buy_signal_mean_reversion():
     strategy = Strategy()
-    
-    # BUY CONDITION: Fast EMA crosses above Slow EMA AND RSI in [50, 65]
-    def side_effect_ema(close, length):
-        if length == 12:
-            return make_series(10.0, 15.0)  # Fast EMA
-        else:
-            return make_series(12.0, 12.0)  # Slow EMA
+    # To get BUY in Mean Reversion:
+    # ATR/close >= 0.015 -> close=100, high=102, low=98, ATR approx 4.0
+    # ADX < 25 (default is RANGING if no ADX or ADX < 25)
+    # close <= bbl (lower band)
+    # RSI <= 30
+    df = pd.DataFrame({
+        'close': [100.0] * 29 + [90.0],
+        'high': [102.0] * 29 + [92.0],
+        'low': [98.0] * 29 + [88.0],
+        'volume': [1000.0] * 30
+    })
+    # We will mock pandas_ta_classic within Strategy since it's hard to generate perfect data for ta.bbands and ta.rsi
+    with patch('src.strategy.ta.rsi') as mock_rsi, \
+         patch('src.strategy.ta.atr') as mock_atr, \
+         patch('src.strategy.ta.bbands') as mock_bbands, \
+         patch('src.strategy.ta.adx') as mock_adx:
+         
+        mock_rsi.return_value = pd.Series([50.0]*29 + [20.0]) # RSI=20
+        mock_atr.return_value = pd.Series([2.0]*30) # ATR=2.0 -> 2.0/90.0 >= 0.015
+        mock_adx.return_value = pd.DataFrame({'ADX_14': [20.0]*30}) # ADX=20
+        # BBands: BBL, BBM, BBU. We need close <= BBL -> 90 <= BBL. So BBL=95
+        mock_bbands.return_value = pd.DataFrame({
+            'BBL_20_2.0': [95.0]*30,
+            'BBM_20_2.0': [100.0]*30,
+            'BBU_20_2.0': [105.0]*30,
+            'BBB_20_2.0': [10.0]*30,
+            'BBP_20_2.0': [0.5]*30
+        })
 
-    mock_ema.side_effect = side_effect_ema
-    mock_rsi.return_value = make_series(50.0, 55.0) # RSI between 50 and 70
-    
-    df = pd.DataFrame({'close': [100.0] * 30})
-    signal = strategy.evaluate('BTC/EUR', df)
-    assert signal == 'BUY'
+        signal = strategy.evaluate('BTC/EUR', df)
+        assert signal['signal'] == 'BUY'
+        assert signal['source'] == 'mean_reversion'
 
-@patch('src.strategy.ta.bbands')
-@patch('src.strategy.ta.macd')
-@patch('src.strategy.SentimentAnalyzer')
-@patch('src.strategy.ta.ema')
-@patch('src.strategy.ta.rsi')
-def test_strategy_sell_signal_rsi(mock_rsi, mock_ema, mock_sentiment, mock_macd, mock_bbands):
-    mock_sentiment_instance = Mock()
-    mock_sentiment_instance.get_market_sentiment.return_value = 0.0
-    mock_sentiment.return_value = mock_sentiment_instance
-    mock_macd.return_value = None
-    mock_bbands.return_value = None
-    
+def test_strategy_sell_signal_mean_reversion():
     strategy = Strategy()
-    
-    # SELL CONDITION: RSI > 75
-    def side_effect_ema(close, length):
-        return make_series(10.0, 15.0)
+    df = pd.DataFrame({
+        'close': [100.0] * 29 + [105.0],
+        'high': [102.0] * 29 + [107.0],
+        'low': [98.0] * 29 + [103.0],
+        'volume': [1000.0] * 30
+    })
+    with patch('src.strategy.ta.rsi') as mock_rsi, \
+         patch('src.strategy.ta.atr') as mock_atr, \
+         patch('src.strategy.ta.bbands') as mock_bbands, \
+         patch('src.strategy.ta.adx') as mock_adx:
+         
+        mock_rsi.return_value = pd.Series([50.0]*30)
+        mock_atr.return_value = pd.Series([2.0]*30) # ATR=2.0 -> 2.0/105.0 >= 0.015
+        mock_adx.return_value = pd.DataFrame({'ADX_14': [20.0]*30})
+        # BBands: close >= BBM -> 105 >= BBM. So BBM=100
+        mock_bbands.return_value = pd.DataFrame({
+            'BBL_20_2.0': [95.0]*30,
+            'BBM_20_2.0': [100.0]*30,
+            'BBU_20_2.0': [105.0]*30,
+            'BBB_20_2.0': [10.0]*30,
+            'BBP_20_2.0': [0.5]*30
+        })
 
-    mock_ema.side_effect = side_effect_ema
-    mock_rsi.return_value = make_series(80.0, 80.0) # RSI > 75
-    
-    df = pd.DataFrame({'close': [100.0] * 30})
-    signal = strategy.evaluate('BTC/EUR', df)
-    assert signal == 'SELL'
+        signal = strategy.evaluate('BTC/EUR', df)
+        assert signal['signal'] == 'SELL'
 
-@patch('src.strategy.ta.bbands')
-@patch('src.strategy.ta.macd')
-@patch('src.strategy.SentimentAnalyzer')
-@patch('src.strategy.ta.ema')
-@patch('src.strategy.ta.rsi')
-def test_strategy_sell_signal_cross(mock_rsi, mock_ema, mock_sentiment, mock_macd, mock_bbands):
-    mock_sentiment_instance = Mock()
-    mock_sentiment_instance.get_market_sentiment.return_value = 0.0
-    mock_sentiment.return_value = mock_sentiment_instance
-    mock_macd.return_value = None
-    mock_bbands.return_value = None
-    
+def test_strategy_buy_signal_breakout():
     strategy = Strategy()
-    
-    # SELL CONDITION: Fast EMA crosses below Slow EMA
-    def side_effect_ema(close, length):
-        if length == 12:
-            return make_series(15.0, 10.0)  # Fast crosses below
-        else:
-            return make_series(12.0, 12.0)  # Slow
-            
-    mock_ema.side_effect = side_effect_ema
-    mock_rsi.return_value = make_series(50.0, 50.0) # Neutral RSI
-    
-    df = pd.DataFrame({'close': [100.0] * 30})
-    signal = strategy.evaluate('BTC/EUR', df)
-    assert signal == 'SELL'
+    # close > Donchian_High_20, vol_ratio >= 2.0, close_pos >= 0.75, ADX >= 25
+    df = pd.DataFrame({
+        'close': [100.0] * 29 + [110.0],
+        'high': [102.0] * 29 + [110.0], # close_pos = (110 - 100) / (110 - 100) = 1.0
+        'low': [98.0] * 29 + [100.0],
+        'volume': [1000.0] * 29 + [3000.0] # vol_ratio = 3000 / avg(1000) = 3.0
+    })
+    with patch('src.strategy.ta.rsi') as mock_rsi, \
+         patch('src.strategy.ta.atr') as mock_atr, \
+         patch('src.strategy.ta.bbands') as mock_bbands, \
+         patch('src.strategy.ta.adx') as mock_adx:
+         
+        mock_rsi.return_value = pd.Series([50.0]*30)
+        mock_atr.return_value = pd.Series([5.0]*30)
+        mock_adx.return_value = pd.DataFrame({'ADX_14': [30.0]*30}) # Trending
+        mock_bbands.return_value = None # Doesn't matter
 
-@patch('src.strategy.ta.bbands')
-@patch('src.strategy.ta.macd')
-@patch('src.strategy.SentimentAnalyzer')
-@patch('src.strategy.ta.ema')
-@patch('src.strategy.ta.rsi')
-def test_strategy_hold_signal(mock_rsi, mock_ema, mock_sentiment, mock_macd, mock_bbands):
-    mock_sentiment_instance = Mock()
-    mock_sentiment_instance.get_market_sentiment.return_value = 0.0
-    mock_sentiment.return_value = mock_sentiment_instance
-    mock_macd.return_value = None
-    mock_bbands.return_value = None
-    
+        signal = strategy.evaluate('BTC/EUR', df)
+        assert signal['signal'] == 'BUY'
+        assert signal['source'] == 'breakout'
+
+def test_strategy_hold_signal():
     strategy = Strategy()
-    
-    # HOLD CONDITION: No crosses, neutral RSI
-    def side_effect_ema(close, length):
-        if length == 12:
-            return make_series(10.0, 10.0)
-        else:
-            return make_series(12.0, 12.0)
-            
-    mock_ema.side_effect = side_effect_ema
-    mock_rsi.return_value = make_series(50.0, 50.0)
-    
-    df = pd.DataFrame({'close': [100.0] * 30})
-    signal = strategy.evaluate('BTC/EUR', df)
-    assert signal == 'HOLD'
+    df = pd.DataFrame({
+        'close': [100.0] * 30,
+        'high': [102.0] * 30,
+        'low': [98.0] * 30,
+        'volume': [1000.0] * 30
+    })
+    with patch('src.strategy.ta.rsi') as mock_rsi, \
+         patch('src.strategy.ta.atr') as mock_atr, \
+         patch('src.strategy.ta.bbands') as mock_bbands, \
+         patch('src.strategy.ta.adx') as mock_adx:
+         
+        mock_rsi.return_value = pd.Series([50.0]*30)
+        mock_atr.return_value = pd.Series([2.0]*30) 
+        mock_adx.return_value = pd.DataFrame({'ADX_14': [20.0]*30})
+        mock_bbands.return_value = pd.DataFrame({
+            'BBL_20_2.0': [95.0]*30,
+            'BBM_20_2.0': [101.0]*30,
+            'BBU_20_2.0': [105.0]*30,
+            'BBB_20_2.0': [10.0]*30,
+            'BBP_20_2.0': [0.5]*30
+        })
+
+        signal = strategy.evaluate('BTC/EUR', df)
+        assert signal['signal'] == 'HOLD'
 
 def test_minimum_notional_gate(caplog):
     mock_exchange = Mock()
@@ -189,26 +193,18 @@ def test_position_tracker_trailing_stop(tmp_path):
     tracker = PositionTracker(pos_file, hist_file)
     
     # 1. Entry at $100
-    tracker.record_entry("BTC/USDC", entry_price=100.0, amount=0.05, quote="USDC")
+    tracker.record_entry("BTC/USDC", entry_price=100.0, amount=0.05, quote="USDC", source="breakout")
     
-    # 2. Price rises to $101 (+1.0%) -> trailing not yet active (needs +1.5%)
-    assert tracker.check_position_exit("BTC/USDC", 101.0) is None
-    
-    # 3. Price peaks at $103 (+3.0%) -> activates trailing stop
+    # 3. Price peaks at $103 (+3.0%) -> activates trailing stop (internally)
     assert tracker.check_position_exit("BTC/USDC", 103.0) is None
-    pos = tracker.get_open_position("BTC/USDC")
-    assert pos["trailing_active"] is True
-    assert pos["highest_price"] == 103.0
     
-    # 4. Price retraces 1.2% from peak (to 101.5, below 103 * 0.99 = 101.97) -> triggers TRAILING_STOP
-    exit_check = tracker.check_position_exit("BTC/USDC", 101.5)
-    assert exit_check is not None
-    exit_type, reason, pnl_pct = exit_check
-    assert exit_type == "TRAILING_STOP"
-    assert pnl_pct > 1.0  # Profitable exit
+    # 4. Price falls to $101.0, which is below 103 * (1 - 0.012) = 101.764
+    exit_result = tracker.check_position_exit("BTC/USDC", 101.0)
+    assert exit_result is not None
+    assert exit_result[0] == "TRAILING_STOP"
     
     # 5. Record exit and verify history
-    tracker.record_exit("BTC/USDC", 101.5, "Trailing stop hit")
+    tracker.record_exit("BTC/USDC", 101.0, "Trailing stop hit")
     assert tracker.get_open_position("BTC/USDC") is None
     history = tracker.get_trade_history()
     assert len(history) >= 1
@@ -221,14 +217,14 @@ def test_position_tracker_hard_stop_loss(tmp_path):
     hist_file = str(tmp_path / "test_history.json")
     
     tracker = PositionTracker(pos_file, hist_file)
-    tracker.record_entry("ETH/USDC", entry_price=100.0, amount=0.05, quote="USDC")
+    tracker.record_entry("ETH/USDC", entry_price=100.0, amount=0.05, quote="USDC", source="mean_reversion")
     
-    # Drops 2.6% (below -2.5% HARD_STOP_LOSS)
-    exit_check = tracker.check_position_exit("ETH/USDC", 97.4)
+    # Drops 1.5% (below -1.0% HARD_STOP_LOSS for mean_reversion)
+    exit_check = tracker.check_position_exit("ETH/USDC", 98.5)
     assert exit_check is not None
     exit_type, reason, pnl_pct = exit_check
     assert exit_type == "HARD_STOP_LOSS"
-    assert pnl_pct <= -2.5
+    assert pnl_pct <= -1.5
 
 def test_position_tracker_take_profit(tmp_path):
     from src.position_tracker import PositionTracker
@@ -236,24 +232,24 @@ def test_position_tracker_take_profit(tmp_path):
     hist_file = str(tmp_path / "test_history.json")
     
     tracker = PositionTracker(pos_file, hist_file)
-    tracker.record_entry("SOL/USDC", entry_price=100.0, amount=0.05, quote="USDC")
+    tracker.record_entry("SOL/USDC", entry_price=100.0, amount=0.05, quote="USDC", source="mean_reversion")
     
-    # Surges +5.5% (above +5.0% TAKE_PROFIT_TARGET)
-    exit_check = tracker.check_position_exit("SOL/USDC", 105.5)
+    # Surges +2.6% (above +2.5% TAKE_PROFIT_TARGET for mean_reversion)
+    exit_check = tracker.check_position_exit("SOL/USDC", 102.6)
     assert exit_check is not None
     exit_type, reason, pnl_pct = exit_check
     assert exit_type == "TAKE_PROFIT"
-    assert pnl_pct >= 5.0
+    assert pnl_pct >= 2.5
 
 def test_top_mover_screener():
     from src.screener import TopMoverScreener
     mock_exchange = Mock()
     mock_exchange.fetch_tickers.return_value = {
-        'BTC/USDC': {'quoteVolume': 1000000, 'percentage': 1.0},
-        'SAND/USDC': {'quoteVolume': 500000, 'percentage': 25.0},
+        'BTC/USDC': {'quoteVolume': 10000000, 'percentage': 1.0},
+        'SAND/USDC': {'quoteVolume': 8000000, 'percentage': 25.0},
         'LOWVOL/USDC': {'quoteVolume': 1000, 'percentage': 50.0}, # Too low volume
         'BEAR/USDC': {'quoteVolume': 200000, 'percentage': 30.0},  # Leveraged token
-        'ETH/USDC': {'quoteVolume': 800000, 'percentage': 0.5},
+        'ETH/USDC': {'quoteVolume': 8000000, 'percentage': 0.5},
     }
     
     screener = TopMoverScreener(mock_exchange, cache_duration_seconds=10)
@@ -265,5 +261,54 @@ def test_top_mover_screener():
     assert 'BEAR/USDC' not in screened
     assert 'LOWVOL/USDC' not in screened
     assert 'BTC/USDC' in screened
+
+def test_trailing_stop_not_triggered_below_activation(tmp_path):
+    from src.position_tracker import PositionTracker
+    tracker = PositionTracker()
+    
+    # Entry at $100
+    tracker.record_entry("ADA/USDC", entry_price=100.0, amount=1.0, quote="USDC", source="breakout")
+    
+    # 1. Price wiggles up slightly to $100.30 (+0.3%), not enough to arm (+1.5%)
+    assert tracker.check_position_exit("ADA/USDC", 100.30) is None
+    
+    # 2. Price falls to $99.10 (-0.90%). 
+    # Should NOT trigger trailing stop because it never armed, and has not hit hard stop (-2.5%)
+    assert tracker.check_position_exit("ADA/USDC", 99.10) is None
+    
+    # 3. Price surges to $102.50 (+2.50%) -> arms trailing stop
+    assert tracker.check_position_exit("ADA/USDC", 102.50) is None
+    
+    # 4. Price falls back to $101.20 (> 1.0% below 102.50 peak) -> Trailing stop hits with profit!
+    exit_check = tracker.check_position_exit("ADA/USDC", 101.20)
+    assert exit_check is not None
+    exit_type, reason, pnl_pct = exit_check
+    assert exit_type == "TRAILING_STOP"
+    assert pnl_pct > 0  # Locked in green profit!
+
+def test_instance_locking(tmp_path):
+    from main import acquire_instance_lock
+    import main
+    
+    # Reset any existing socket lock
+    if main._SOCKET_LOCK:
+        try:
+            main._SOCKET_LOCK.close()
+        except Exception:
+            pass
+        main._SOCKET_LOCK = None
+
+    lock_pid_path = str(tmp_path / "test_bot.pid")
+    lock1 = acquire_instance_lock(port=58998, lock_path=lock_pid_path)
+    assert lock1 is not None
+    
+    # Second attempt on same port must be rejected
+    lock2 = acquire_instance_lock(port=58998, lock_path=lock_pid_path)
+    assert lock2 is None
+    
+    # Cleanup first lock
+    lock1.close()
+    main._SOCKET_LOCK = None
+
 
 

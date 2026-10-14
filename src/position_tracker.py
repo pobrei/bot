@@ -25,17 +25,18 @@ class PositionTracker:
     def get_open_position(self, symbol: str) -> Optional[Dict[str, Any]]:
         return database.get_open_position(symbol)
 
-    def record_entry(self, symbol: str, entry_price: float, amount: float, quote: str = "USDC") -> Dict[str, Any]:
+    def record_entry(self, symbol: str, entry_price: float, amount: float, quote: str = "USDC", source: str = "unknown") -> Dict[str, Any]:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         pos_data = {
             "symbol": symbol,
             "entry_price": float(entry_price),
-            "highest_price": float(entry_price),
+            "peak_price": float(entry_price),
             "amount": float(amount),
             "quote": quote,
             "trailing_active": False,
-            "entry_time": now_str
+            "entry_time": now_str,
+            "source": source
         }
         
         database.upsert_position(pos_data)
@@ -49,7 +50,7 @@ class PositionTracker:
 
     def check_position_exit(self, symbol: str, current_price: float) -> Optional[Tuple[str, str, float]]:
         """
-        Evaluates an open position against Stop-Loss, Trailing Stop, and Take-Profit rules.
+        Evaluates an open position against Stop-Loss, Trailing Stop, and Take-Profit rules based on source strategy.
         Returns: (exit_type, reason, pnl_pct) or None if holding.
         """
         pos = database.get_open_position(symbol)
@@ -57,46 +58,75 @@ class PositionTracker:
             return None
 
         entry_price = pos["entry_price"]
-        highest_price = pos.get("highest_price", entry_price)
+        peak_price = pos.get("peak_price", entry_price)
         trailing_active = pos.get("trailing_active", False)
+        source = pos.get("source", "unknown")
 
         changed = False
         # 1. Update highest price if reached new peak
-        if current_price > highest_price:
-            highest_price = current_price
-            pos["highest_price"] = highest_price
+        if current_price > peak_price:
+            peak_price = current_price
+            pos["peak_price"] = peak_price
             changed = True
 
         # 2. Calculate PnL percentage relative to entry
         gain_pct = ((current_price - entry_price) / entry_price) * 100.0
+        peak_gain_pct = ((peak_price - entry_price) / entry_price) * 100.0
 
-        # 3. Check Trailing Stop activation
-        peak_gain_pct = ((highest_price - entry_price) / entry_price) * 100.0
-        if peak_gain_pct >= TRAILING_STOP_ACTIVATION and not trailing_active:
+        # 3. Check Trailing Stop arming / activation
+        activation_threshold = TRAILING_STOP_ACTIVATION if TRAILING_STOP_ACTIVATION else 1.5
+        if peak_gain_pct >= activation_threshold and not trailing_active:
             trailing_active = True
             pos["trailing_active"] = True
             changed = True
-            logger.info(f"[{symbol}] Trailing Stop ACTIVATED! Peak Gain: +{peak_gain_pct:.2f}% (Threshold: {TRAILING_STOP_ACTIVATION}%)")
+            logger.info(f"[{symbol}] Trailing Stop ARMED! Peak Gain: +{peak_gain_pct:.2f}% (Threshold: +{activation_threshold}%)")
 
         if changed:
             database.upsert_position(pos)
 
-        # 4. Check Hard Stop-Loss
-        if gain_pct <= -HARD_STOP_LOSS:
-            reason = f"Hard Stop-Loss hit: Price dropped {gain_pct:.2f}% (Limit: -{HARD_STOP_LOSS}%)"
-            return ("HARD_STOP_LOSS", reason, gain_pct)
+        # 4. Handle Stop-Loss, Trailing Stop, and Take-Profit logic per strategy
+        # Tiered Trailing Stop & Breakeven Lock-in:
+        # Tier 1 (Gain >= 1.5%): Stop raised to at least breakeven (+0.4% floor covering fees)
+        # Tier 2 (Gain >= 2.5%): Runner mode! Trail tightens to 0.6% from peak to lock in gains
+        if peak_gain_pct >= 2.5:
+            trail_distance = 0.006  # Tight 0.6% trail for runners above +2.5%
+            trailing_trigger_price = peak_price * (1.0 - trail_distance)
+        else:
+            trail_distance = (TRAILING_STOP_DISTANCE / 100.0) if TRAILING_STOP_DISTANCE else 0.010
+            breakeven_floor = entry_price * 1.004  # +0.4% ensures fees are guaranteed covered
+            trailing_trigger_price = max(peak_price * (1.0 - trail_distance), breakeven_floor)
 
-        # 5. Check Take-Profit Target
-        if gain_pct >= TAKE_PROFIT_TARGET:
-            reason = f"Take-Profit Target reached: +{gain_pct:.2f}% (Target: +{TAKE_PROFIT_TARGET}%)"
-            return ("TAKE_PROFIT", reason, gain_pct)
+        is_trend_or_swing = any(k in source.lower() for k in ["breakout", "revolut", "swing"])
 
-        # 6. Check Trailing Stop Trigger (distance from peak)
-        if trailing_active:
-            trailing_trigger_price = highest_price * (1.0 - (TRAILING_STOP_DISTANCE / 100.0))
-            if current_price <= trailing_trigger_price:
-                reason = f"Trailing Stop hit: Price fell to {current_price:.4f} from peak {highest_price:.4f} (+{gain_pct:.2f}% locked in)"
+        if is_trend_or_swing:
+            # Trailing stop fires only if armed and price fell by trail_distance from peak
+            if trailing_active and current_price <= trailing_trigger_price:
+                reason = f"Trailing Stop hit: Price fell to {current_price:.4f} from peak {peak_price:.4f} (+{gain_pct:.2f}%)"
                 return ("TRAILING_STOP", reason, gain_pct)
+            
+            sl_limit = -abs(HARD_STOP_LOSS) if HARD_STOP_LOSS else -2.5
+            if gain_pct <= sl_limit:
+                reason = f"Hard Stop-Loss hit: Price dropped {gain_pct:.2f}% (Limit: {sl_limit:.1f}%)"
+                return ("HARD_STOP_LOSS", reason, gain_pct)
+
+            tp_target = TAKE_PROFIT_TARGET if TAKE_PROFIT_TARGET else 5.0
+            if gain_pct >= tp_target:
+                reason = f"Take-Profit hit: +{gain_pct:.2f}% (Target: +{tp_target:.1f}%)"
+                return ("TAKE_PROFIT", reason, gain_pct)
+
+        else:
+            # Mean Reversion: quick targets
+            if trailing_active and current_price <= trailing_trigger_price:
+                reason = f"MR Trailing Stop hit: Price fell to {current_price:.4f} from peak {peak_price:.4f} (+{gain_pct:.2f}%)"
+                return ("TRAILING_STOP", reason, gain_pct)
+
+            if gain_pct <= -1.0:
+                reason = f"MR Hard Stop-Loss hit: Price dropped {gain_pct:.2f}% (Limit: -1.0%)"
+                return ("HARD_STOP_LOSS", reason, gain_pct)
+            
+            if gain_pct >= 2.5:
+                reason = f"MR Take-Profit Target reached: +{gain_pct:.2f}% (Target: +2.5%)"
+                return ("TAKE_PROFIT", reason, gain_pct)
 
         return None
 
@@ -129,6 +159,19 @@ class PositionTracker:
         # Update database
         database.remove_position(symbol)
         database.insert_trade_history(trade_record)
+
+        # Differentiated Cooldown Lifecycle:
+        # Winning / Profitable trades: 90m cooldown (5400s) to allow market consolidation after profit taking
+        # Losing / Stopped-out trades: 4h cooldown (14400s) to prevent revenge trading or knife-catching
+        is_profitable = (realized_pnl > 0) or (pnl_pct > 0)
+        if is_profitable:
+            cooldown_duration = 5400.0  # 90 minutes
+            cooldown_reason = f"Profit Cooldown (90m): {reason}"
+        else:
+            cooldown_duration = 14400.0  # 4 hours
+            cooldown_reason = f"Loss Cooldown (4h): {reason}"
+
+        database.set_symbol_cooldown(symbol, duration_seconds=cooldown_duration, reason=cooldown_reason)
 
         logger.info(f"[POSITION CLOSED] {symbol} @ {exit_price:.4f} | Reason: {reason} | PnL: {pnl_pct:+.2f}% ({realized_pnl:+.4f} {quote})")
         

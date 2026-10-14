@@ -1,4 +1,5 @@
 import mplfinance as mpf
+import matplotlib.pyplot as plt
 import pandas as pd
 import logging
 import os
@@ -8,11 +9,77 @@ from plotly.subplots import make_subplots
 
 logger = logging.getLogger(__name__)
 
+def calculate_dynamic_price_spectrums(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    """
+    Computes dynamic execution spectrums based on the quantitative framework:
+    - Buy Spectrum (Accumulation): [min(Lower BB, Close - 0.75 * ATR), Close + 0.15 * ATR]
+    - Sell Spectrum 1 (Conservative TP): [Close + 1.2 * ATR, Close + 1.8 * ATR]
+    - Sell Spectrum 2 (Runner TP): [max(Upper BB, Close + 2.2 * ATR), Close + 2.8 * ATR]
+    - Invalidation Floor: Buy Floor - 1.0 * ATR
+    """
+    if df is None or df.empty or len(df) < 5:
+        return None
+        
+    curr = df.iloc[-1]
+    close = float(curr['close'])
+    atr = float(curr.get('ATR_14', 0.0))
+    if pd.isna(atr) or atr <= 0:
+        return None
+        
+    bbl_col = next((c for c in df.columns if c.startswith('BBL')), None)
+    bbu_col = next((c for c in df.columns if c.startswith('BBU')), None)
+    
+    bbl = float(curr[bbl_col]) if bbl_col and not pd.isna(curr[bbl_col]) else None
+    bbu = float(curr[bbu_col]) if bbu_col and not pd.isna(curr[bbu_col]) else None
+    
+    buy_floor = min(bbl, close - 0.75 * atr) if bbl is not None else (close - 0.75 * atr)
+    buy_ceiling = close + 0.15 * atr
+    
+    tp1_floor = close + 1.2 * atr
+    tp1_ceiling = close + 1.8 * atr
+    
+    tp2_floor = max(bbu, close + 2.2 * atr) if bbu is not None else (close + 2.2 * atr)
+    tp2_ceiling = close + 2.8 * atr
+    
+    invalidation = buy_floor - 1.0 * atr
+    
+    # Determine current price position relative to accumulation spectrum
+    if close <= buy_ceiling and close >= buy_floor:
+        status = "IN_ZONE"
+        status_label = "🟢 In Accumulation Zone"
+    elif close < buy_floor:
+        status = "DEEP_DISCOUNT"
+        status_label = "⚠️ Below Accumulation Floor (Deep Dip)"
+    elif close <= tp1_ceiling and close > buy_ceiling:
+        status = "APPROACHING_TP1"
+        status_label = "🟡 In Conservative TP Range"
+    elif close >= tp2_floor:
+        status = "IN_RUNNER_ZONE"
+        status_label = "🟣 In Runner Expansion Zone"
+    else:
+        status = "EXTENDED"
+        status_label = "⚡ Above Accumulation (Extended)"
+        
+    return {
+        "close": close,
+        "atr": atr,
+        "buy_floor": buy_floor,
+        "buy_ceiling": buy_ceiling,
+        "tp1_floor": tp1_floor,
+        "tp1_ceiling": tp1_ceiling,
+        "tp2_floor": tp2_floor,
+        "tp2_ceiling": tp2_ceiling,
+        "invalidation": invalidation,
+        "status": status,
+        "status_label": status_label
+    }
+
 def create_interactive_candlestick(
     symbol: str, 
     df: pd.DataFrame, 
     regime: str = "UNKNOWN", 
-    timeframe: str = "1h"
+    timeframe: str = "1h",
+    show_spectrums: bool = True
 ) -> go.Figure:
     """
     Builds a professional interactive candlestick chart with EMA overlays,
@@ -113,6 +180,59 @@ def create_interactive_candlestick(
             ),
             row=1, col=1, secondary_y=False
         )
+
+    # 3.5 Dynamic Price Spectrums (Accumulation, Conservative TP, Runner TP, Invalidation)
+    if show_spectrums:
+        spectrums = calculate_dynamic_price_spectrums(df_plot)
+        if spectrums:
+            # 1. Accumulation / Buy Spectrum (Green band)
+            fig.add_hrect(
+                y0=spectrums['buy_floor'],
+                y1=spectrums['buy_ceiling'],
+                fillcolor='rgba(14, 203, 129, 0.10)',
+                line=dict(color='rgba(14, 203, 129, 0.55)', width=1, dash='dot'),
+                annotation_text="🟢 Accumulation Zone",
+                annotation_position="top left",
+                annotation_font_size=9,
+                annotation_font_color="#0ECB81",
+                row=1, col=1
+            )
+            # 2. Conservative TP Spectrum 1 (Amber/Yellow band)
+            fig.add_hrect(
+                y0=spectrums['tp1_floor'],
+                y1=spectrums['tp1_ceiling'],
+                fillcolor='rgba(240, 185, 11, 0.08)',
+                line=dict(color='rgba(240, 185, 11, 0.55)', width=1, dash='dot'),
+                annotation_text="🟡 Conservative TP",
+                annotation_position="top left",
+                annotation_font_size=9,
+                annotation_font_color="#F0B90B",
+                row=1, col=1
+            )
+            # 3. Runner TP Spectrum 2 (Purple/Cyan band)
+            fig.add_hrect(
+                y0=spectrums['tp2_floor'],
+                y1=spectrums['tp2_ceiling'],
+                fillcolor='rgba(171, 71, 188, 0.08)',
+                line=dict(color='rgba(171, 71, 188, 0.55)', width=1, dash='dot'),
+                annotation_text="🟣 Runner TP",
+                annotation_position="top left",
+                annotation_font_size=9,
+                annotation_font_color="#AB47BC",
+                row=1, col=1
+            )
+            # 4. Invalidation Floor (Red dashed line)
+            fig.add_hline(
+                y=spectrums['invalidation'],
+                line_dash='dash',
+                line_color='rgba(246, 70, 93, 0.85)',
+                line_width=1.5,
+                annotation_text=f"🔴 Invalidation Floor (${spectrums['invalidation']:.4f})",
+                annotation_position="bottom left",
+                annotation_font_size=9,
+                annotation_font_color="#F6465D",
+                row=1, col=1
+            )
 
     # 4. Volume Bars on secondary Y axis
     if 'volume' in df_plot.columns and not df_plot['volume'].isna().all():
@@ -222,16 +342,18 @@ def create_equity_curve_chart(
     Builds an interactive Equity Curve chart with high-water mark,
     5% max drawdown threshold, and $20 emergency circuit breaker floor.
     """
-    if not snapshots:
+    valid_snapshots = [s for s in snapshots if float(s.get('equity', 0)) > 0]
+    if not valid_snapshots:
         # Generate dummy single-point baseline
         times = [pd.Timestamp.now()]
-        equities = [current_equity]
+        equities = [current_equity if current_equity > 0 else starting_capital]
     else:
-        times = [pd.to_datetime(s['timestamp']) for s in snapshots]
-        equities = [float(s['equity']) for s in snapshots]
+        times = [pd.to_datetime(s['timestamp']) for s in valid_snapshots]
+        equities = [float(s['equity']) for s in valid_snapshots]
         # Append current equity as last point
-        times.append(pd.Timestamp.now())
-        equities.append(current_equity)
+        if current_equity > 0:
+            times.append(pd.Timestamp.now())
+            equities.append(current_equity)
 
     hwm = max(equities) if equities else starting_capital
     max_dd_limit = hwm * 0.95 # 5% drawdown line
@@ -378,7 +500,10 @@ def plot_market_graph(symbol: str, df: pd.DataFrame, timeframe: str):
         os.makedirs("graphs", exist_ok=True)
         df_plot = df.copy()
         if 'timestamp' in df_plot.columns:
-            df_plot['timestamp'] = pd.to_datetime(df_plot['timestamp'], unit='ms')
+            if pd.api.types.is_numeric_dtype(df_plot['timestamp']):
+                df_plot['timestamp'] = pd.to_datetime(df_plot['timestamp'], unit='ms')
+            else:
+                df_plot['timestamp'] = pd.to_datetime(df_plot['timestamp'])
             df_plot.set_index('timestamp', inplace=True)
             
         safe_symbol = symbol.replace("/", "_")
@@ -404,4 +529,6 @@ def plot_market_graph(symbol: str, df: pd.DataFrame, timeframe: str):
         logger.info(f"Market graph saved to {filename}")
     except Exception as e:
         logger.error(f"Failed to generate graph for {symbol}: {e}")
+    finally:
+        plt.close('all')
 
