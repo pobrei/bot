@@ -133,11 +133,11 @@ def test_breakout_anti_exhaustion_filter():
     
     strategy = Strategy()
     df = pd.DataFrame({
-        'open': [100.0]*29 + [102.0],
-        'close': [100.0]*29 + [108.0],
-        'high': [101.0]*29 + [109.0],
-        'low': [99.0]*29 + [101.0],
-        'volume': [1000.0]*29 + [5000.0]  # Massive volume breakout
+        'open': [100.0]*28 + [102.0, 102.0],
+        'close': [100.0]*28 + [108.0, 108.0],
+        'high': [101.0]*28 + [109.0, 109.0],
+        'low': [99.0]*28 + [101.0, 101.0],
+        'volume': [1000.0]*28 + [5000.0, 5000.0]  # Massive volume breakout on closed bar
     })
     
     with patch('src.strategy.ta.rsi') as mock_rsi, \
@@ -150,12 +150,12 @@ def test_breakout_anti_exhaustion_filter():
         mock_adx.return_value = pd.DataFrame({'ADX_14': [35.0]*30}) # TRENDING
         
         # Case A: Exhausted blow-off top (RSI = 85 like the SAND pump) -> MUST BE REJECTED!
-        mock_rsi.return_value = pd.Series([60.0]*29 + [85.0])
+        mock_rsi.return_value = pd.Series([60.0]*28 + [85.0, 85.0])
         res_exhausted = strategy.evaluate("EXHAUST/USDC", df)
         assert res_exhausted['signal'] == 'HOLD'
         
         # Case B: Fresh breakout (RSI = 65, healthy momentum) -> MUST TRIGGER BUY!
-        mock_rsi.return_value = pd.Series([55.0]*29 + [65.0])
+        mock_rsi.return_value = pd.Series([55.0]*28 + [65.0, 65.0])
         res_fresh = strategy.evaluate("FRESH/USDC", df)
         assert res_fresh['signal'] == 'BUY'
         assert res_fresh['source'] == 'breakout'

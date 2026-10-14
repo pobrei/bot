@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use('Agg')
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 import pandas as pd

@@ -2,7 +2,7 @@ import ccxt
 import time
 import logging
 from typing import Optional, Callable, Any
-from .config import DRY_RUN
+from .config import DRY_RUN, MAX_SPREAD_PCT
 from .portfolio import PortfolioManager
 
 logger = logging.getLogger(__name__)
@@ -51,8 +51,23 @@ class ExecutionManager:
             min_qty = market.get('limits', {}).get('amount', {}).get('min', 0.0)
             
             ticker = self._fetch_ticker(symbol)
-            price = ticker['last']
-            
+            price = ticker.get('last') or ticker.get('close')
+            bid = ticker.get('bid') or 0.0
+            ask = ticker.get('ask') or 0.0
+
+            if side == 'buy':
+                # Order Book Spread Gate: protect micro-capital from illiquid altcoin slippage
+                if bid > 0.0 and ask > 0.0:
+                    spread_pct = (ask - bid) / bid
+                    if spread_pct > MAX_SPREAD_PCT:
+                        logger.warning(
+                            f"[{symbol}] Spread gate triggered: {spread_pct*100:.3f}% > {MAX_SPREAD_PCT*100:.2f}% "
+                            f"(Bid: {bid}, Ask: {ask}). BUY order rejected."
+                        )
+                        return None
+                    # Use ask as precise buy entry price reference
+                    price = ask
+
             if not price:
                 logger.error(f"Could not fetch latest price for {symbol} execution.")
                 return None

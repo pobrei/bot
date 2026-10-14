@@ -15,10 +15,15 @@ def test_strategy_buy_signal_mean_reversion():
     # ADX < 25 (default is RANGING if no ADX or ADX < 25)
     # close <= bbl (lower band)
     # RSI <= 30
+    # To get BUY in Mean Reversion:
+    # ATR/close >= 0.015 -> close=100, high=102, low=98, ATR approx 4.0
+    # ADX < 25 (default is RANGING if no ADX or ADX < 25)
+    # close <= bbl (lower band)
+    # RSI <= 30
     df = pd.DataFrame({
-        'close': [100.0] * 29 + [90.0],
-        'high': [102.0] * 29 + [92.0],
-        'low': [98.0] * 29 + [88.0],
+        'close': [100.0] * 28 + [90.0, 90.0],
+        'high': [102.0] * 28 + [92.0, 92.0],
+        'low': [98.0] * 28 + [88.0, 88.0],
         'volume': [1000.0] * 30
     })
     # We will mock pandas_ta_classic within Strategy since it's hard to generate perfect data for ta.bbands and ta.rsi
@@ -27,7 +32,7 @@ def test_strategy_buy_signal_mean_reversion():
          patch('src.strategy.ta.bbands') as mock_bbands, \
          patch('src.strategy.ta.adx') as mock_adx:
          
-        mock_rsi.return_value = pd.Series([50.0]*29 + [20.0]) # RSI=20
+        mock_rsi.return_value = pd.Series([50.0]*28 + [20.0, 20.0]) # RSI=20
         mock_atr.return_value = pd.Series([2.0]*30) # ATR=2.0 -> 2.0/90.0 >= 0.015
         mock_adx.return_value = pd.DataFrame({'ADX_14': [20.0]*30}) # ADX=20
         # BBands: BBL, BBM, BBU. We need close <= BBL -> 90 <= BBL. So BBL=95
@@ -46,9 +51,9 @@ def test_strategy_buy_signal_mean_reversion():
 def test_strategy_sell_signal_mean_reversion():
     strategy = Strategy()
     df = pd.DataFrame({
-        'close': [100.0] * 29 + [105.0],
-        'high': [102.0] * 29 + [107.0],
-        'low': [98.0] * 29 + [103.0],
+        'close': [100.0] * 28 + [105.0, 105.0],
+        'high': [102.0] * 28 + [107.0, 107.0],
+        'low': [98.0] * 28 + [103.0, 103.0],
         'volume': [1000.0] * 30
     })
     with patch('src.strategy.ta.rsi') as mock_rsi, \
@@ -73,12 +78,12 @@ def test_strategy_sell_signal_mean_reversion():
 
 def test_strategy_buy_signal_breakout():
     strategy = Strategy()
-    # close > Donchian_High_20, vol_ratio >= 2.0, close_pos >= 0.75, ADX >= 25
+    # close > Donchian_High_20, vol_ratio >= 2.0, close_pos >= 0.75, ADX >= 25 on closed candle
     df = pd.DataFrame({
-        'close': [100.0] * 29 + [110.0],
-        'high': [102.0] * 29 + [110.0], # close_pos = (110 - 100) / (110 - 100) = 1.0
-        'low': [98.0] * 29 + [100.0],
-        'volume': [1000.0] * 29 + [3000.0] # vol_ratio = 3000 / avg(1000) = 3.0
+        'close': [100.0] * 28 + [110.0, 110.0],
+        'high': [102.0] * 28 + [110.0, 110.0], # close_pos = (110 - 100) / (110 - 100) = 1.0
+        'low': [98.0] * 28 + [100.0, 100.0],
+        'volume': [1000.0] * 28 + [3000.0, 3000.0] # vol_ratio = 3000 / avg(1000) = 3.0
     })
     with patch('src.strategy.ta.rsi') as mock_rsi, \
          patch('src.strategy.ta.atr') as mock_atr, \

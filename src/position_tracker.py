@@ -25,42 +25,83 @@ class PositionTracker:
     def get_open_position(self, symbol: str) -> Optional[Dict[str, Any]]:
         return database.get_open_position(symbol)
 
-    def record_entry(self, symbol: str, entry_price: float, amount: float, quote: str = "USDC", source: str = "unknown") -> Dict[str, Any]:
+    def record_entry(
+        self, 
+        symbol: str, 
+        entry_price: float, 
+        amount: float, 
+        quote: str = "USDC", 
+        source: str = "unknown",
+        atr: float = 0.0,
+        stop_loss_price: float = 0.0,
+        take_profit_price: float = 0.0
+    ) -> Dict[str, Any]:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry_price = float(entry_price)
+        amount = float(amount)
+        atr = float(atr)
         
+        # Calculate dynamic targets if not explicitly supplied
+        is_trend_or_swing = any(k in source.lower() for k in ["breakout", "revolut", "swing"])
+        if stop_loss_price <= 0.0:
+            if atr > 0.0:
+                stop_loss_price = max(entry_price - 1.5 * atr, entry_price * 0.975)
+            else:
+                stop_loss_price = entry_price * (0.975 if is_trend_or_swing else 0.990)
+
+        if take_profit_price <= 0.0:
+            if atr > 0.0:
+                take_profit_price = entry_price + (3.5 * atr if is_trend_or_swing else 2.0 * atr)
+            else:
+                take_profit_price = entry_price * (1.05 if is_trend_or_swing else 1.025)
+
         pos_data = {
             "symbol": symbol,
-            "entry_price": float(entry_price),
-            "peak_price": float(entry_price),
-            "amount": float(amount),
+            "entry_price": entry_price,
+            "peak_price": entry_price,
+            "amount": amount,
             "quote": quote,
             "trailing_active": False,
             "entry_time": now_str,
-            "source": source
+            "source": source,
+            "atr": atr,
+            "stop_loss_price": float(stop_loss_price),
+            "take_profit_price": float(take_profit_price),
+            "ratcheted": False
         }
         
         database.upsert_position(pos_data)
-        logger.info(f"[POSITION OPENED] {symbol} @ {entry_price:.4f} | Amount: {amount} {symbol.split('/')[0]}")
+        logger.info(
+            f"[POSITION OPENED] {symbol} @ {entry_price:.4f} | SL: {stop_loss_price:.4f} | "
+            f"TP: {take_profit_price:.4f} | Amount: {amount} {symbol.split('/')[0]}"
+        )
         
         # Webhook Notification
-        msg = f"**Symbol:** {symbol}\n**Entry Price:** {entry_price:.4f} {quote}\n**Amount:** {amount}"
+        msg = (
+            f"**Symbol:** {symbol}\n**Entry Price:** {entry_price:.4f} {quote}\n"
+            f"**Amount:** {amount}\n**Stop-Loss:** {stop_loss_price:.4f}\n**Take-Profit:** {take_profit_price:.4f}"
+        )
         send_webhook_alert(f"Position Opened: {symbol}", msg, color=65280) # Green
             
         return pos_data
 
     def check_position_exit(self, symbol: str, current_price: float) -> Optional[Tuple[str, str, float]]:
         """
-        Evaluates an open position against Stop-Loss, Trailing Stop, and Take-Profit rules based on source strategy.
+        Evaluates an open position against Stop-Loss, Trailing Stop, Breakeven Ratchet, and Take-Profit rules.
         Returns: (exit_type, reason, pnl_pct) or None if holding.
         """
         pos = database.get_open_position(symbol)
         if not pos:
             return None
 
-        entry_price = pos["entry_price"]
-        peak_price = pos.get("peak_price", entry_price)
-        trailing_active = pos.get("trailing_active", False)
+        entry_price = float(pos["entry_price"])
+        peak_price = float(pos.get("peak_price", entry_price))
+        trailing_active = bool(pos.get("trailing_active", False))
         source = pos.get("source", "unknown")
+        atr = float(pos.get("atr", 0.0))
+        sl_price = float(pos.get("stop_loss_price", 0.0))
+        tp_price = float(pos.get("take_profit_price", 0.0))
+        ratcheted = bool(pos.get("ratcheted", False))
 
         changed = False
         # 1. Update highest price if reached new peak
@@ -73,60 +114,75 @@ class PositionTracker:
         gain_pct = ((current_price - entry_price) / entry_price) * 100.0
         peak_gain_pct = ((peak_price - entry_price) / entry_price) * 100.0
 
-        # 3. Check Trailing Stop arming / activation
-        activation_threshold = TRAILING_STOP_ACTIVATION if TRAILING_STOP_ACTIVATION else 1.5
-        if peak_gain_pct >= activation_threshold and not trailing_active:
-            trailing_active = True
-            pos["trailing_active"] = True
-            changed = True
-            logger.info(f"[{symbol}] Trailing Stop ARMED! Peak Gain: +{peak_gain_pct:.2f}% (Threshold: +{activation_threshold}%)")
+        # 3. Breakeven Ratchet (Fee Lock):
+        # Once unrealized gain hits +1.2%, ratchet stop_loss_price to entry * 1.003 (+0.3%)
+        if gain_pct >= 1.2 and not ratcheted:
+            be_stop = entry_price * 1.003
+            if be_stop > sl_price:
+                sl_price = be_stop
+                pos["stop_loss_price"] = be_stop
+                pos["ratcheted"] = True
+                ratcheted = True
+                changed = True
+                logger.info(f"[{symbol}] 🛡️ Breakeven Ratchet Activated! Stop raised to {be_stop:.4f} (+0.3% fee lock)")
+
+        # 4. Trailing Stop for Momentum Breakout & Trend Confluence
+        is_trend_or_swing = any(k in source.lower() for k in ["breakout", "revolut", "swing"])
+        trailing_trigger_price = 0.0
+        if is_trend_or_swing:
+            # Trailing stop arms at +1.5% peak gain
+            if peak_gain_pct >= 1.5 and not trailing_active:
+                trailing_active = True
+                pos["trailing_active"] = True
+                changed = True
+                logger.info(f"[{symbol}] Trailing Stop ARMED! Peak Gain: +{peak_gain_pct:.2f}%")
+
+            if trailing_active:
+                if peak_gain_pct >= 2.5:
+                    trail_dist = 0.006 * peak_price  # Tight 0.6% trail for runners above +2.5%
+                elif atr > 0:
+                    trail_dist = 1.5 * atr
+                else:
+                    trail_dist = (TRAILING_STOP_DISTANCE / 100.0) * peak_price if TRAILING_STOP_DISTANCE else (0.010 * peak_price)
+                
+                trailing_trigger_price = peak_price - trail_dist
+                # Ratchet SL up with trailing stop
+                if trailing_trigger_price > sl_price:
+                    sl_price = trailing_trigger_price
+                    pos["stop_loss_price"] = sl_price
+                    changed = True
 
         if changed:
             database.upsert_position(pos)
 
-        # 4. Handle Stop-Loss, Trailing Stop, and Take-Profit logic per strategy
-        # Tiered Trailing Stop & Breakeven Lock-in:
-        # Tier 1 (Gain >= 1.5%): Stop raised to at least breakeven (+0.4% floor covering fees)
-        # Tier 2 (Gain >= 2.5%): Runner mode! Trail tightens to 0.6% from peak to lock in gains
-        if peak_gain_pct >= 2.5:
-            trail_distance = 0.006  # Tight 0.6% trail for runners above +2.5%
-            trailing_trigger_price = peak_price * (1.0 - trail_distance)
-        else:
-            trail_distance = (TRAILING_STOP_DISTANCE / 100.0) if TRAILING_STOP_DISTANCE else 0.010
-            breakeven_floor = entry_price * 1.004  # +0.4% ensures fees are guaranteed covered
-            trailing_trigger_price = max(peak_price * (1.0 - trail_distance), breakeven_floor)
+        # 5. Evaluate Exit Triggers in Priority Order
+        # A. Trailing Stop Exit (Fires only if armed and price fell below trailing trigger)
+        if trailing_active and trailing_trigger_price > 0.0 and current_price <= trailing_trigger_price:
+            reason = f"Trailing Stop hit: Price fell to {current_price:.4f} from peak {peak_price:.4f} (+{gain_pct:.2f}%)"
+            return ("TRAILING_STOP", reason, gain_pct)
 
-        is_trend_or_swing = any(k in source.lower() for k in ["breakout", "revolut", "swing"])
+        # B. Breakeven Ratchet Stop (+0.3% fee lock floor)
+        if ratcheted and sl_price > 0.0 and current_price <= sl_price and current_price >= entry_price:
+            reason = f"Breakeven Ratchet Stop hit: Price fell to {current_price:.4f} (Stop: {sl_price:.4f}, +{gain_pct:.2f}%)"
+            return ("BREAKEVEN_STOP", reason, gain_pct)
 
-        if is_trend_or_swing:
-            # Trailing stop fires only if armed and price fell by trail_distance from peak
-            if trailing_active and current_price <= trailing_trigger_price:
-                reason = f"Trailing Stop hit: Price fell to {current_price:.4f} from peak {peak_price:.4f} (+{gain_pct:.2f}%)"
-                return ("TRAILING_STOP", reason, gain_pct)
-            
-            sl_limit = -abs(HARD_STOP_LOSS) if HARD_STOP_LOSS else -2.5
-            if gain_pct <= sl_limit:
-                reason = f"Hard Stop-Loss hit: Price dropped {gain_pct:.2f}% (Limit: {sl_limit:.1f}%)"
-                return ("HARD_STOP_LOSS", reason, gain_pct)
+        # C. Stop Loss (Dynamic ATR SL / Hard Stop Floor)
+        if sl_price > 0.0 and current_price <= sl_price:
+            reason = f"Stop-Loss hit: Price fell to {current_price:.4f} (Stop: {sl_price:.4f}, {gain_pct:.2f}%)"
+            return ("HARD_STOP_LOSS", reason, gain_pct)
 
-            tp_target = TAKE_PROFIT_TARGET if TAKE_PROFIT_TARGET else 5.0
-            if gain_pct >= tp_target:
-                reason = f"Take-Profit hit: +{gain_pct:.2f}% (Target: +{tp_target:.1f}%)"
-                return ("TAKE_PROFIT", reason, gain_pct)
+        if gain_pct <= -2.5:
+            reason = f"Max Loss Cap hit: Price dropped {gain_pct:.2f}% (Limit: -2.5%)"
+            return ("HARD_STOP_LOSS", reason, gain_pct)
 
-        else:
-            # Mean Reversion: quick targets
-            if trailing_active and current_price <= trailing_trigger_price:
-                reason = f"MR Trailing Stop hit: Price fell to {current_price:.4f} from peak {peak_price:.4f} (+{gain_pct:.2f}%)"
-                return ("TRAILING_STOP", reason, gain_pct)
+        # D. Dynamic Take-Profit Target
+        if tp_price > 0.0 and current_price >= tp_price:
+            reason = f"Dynamic ATR Take-Profit hit: Price reached {current_price:.4f} (Target: {tp_price:.4f}, +{gain_pct:.2f}%)"
+            return ("TAKE_PROFIT", reason, gain_pct)
 
-            if gain_pct <= -1.0:
-                reason = f"MR Hard Stop-Loss hit: Price dropped {gain_pct:.2f}% (Limit: -1.0%)"
-                return ("HARD_STOP_LOSS", reason, gain_pct)
-            
-            if gain_pct >= 2.5:
-                reason = f"MR Take-Profit Target reached: +{gain_pct:.2f}% (Target: +2.5%)"
-                return ("TAKE_PROFIT", reason, gain_pct)
+        if not is_trend_or_swing and gain_pct >= 2.5:
+            reason = f"MR Take-Profit Target reached: +{gain_pct:.2f}% (Target: +2.5%)"
+            return ("TAKE_PROFIT", reason, gain_pct)
 
         return None
 
@@ -184,4 +240,3 @@ class PositionTracker:
 
     def get_trade_history(self) -> List[Dict[str, Any]]:
         return database.get_trade_history()
-
