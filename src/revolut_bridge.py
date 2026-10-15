@@ -248,9 +248,17 @@ class RevolutSignalBridge:
     def get_sentiment(self, binance_symbol: str) -> Optional[Dict[str, Any]]:
         """
         Fetches latest Revolut intelligence for a specific Binance symbol.
+        Supports exact symbol lookup and base currency fallback matching.
         """
         intel = self.get_all_intel()
-        return intel.get(binance_symbol)
+        if binance_symbol in intel:
+            return intel[binance_symbol]
+        
+        base = binance_symbol.split('/')[0] if '/' in binance_symbol else binance_symbol
+        for k, v in intel.items():
+            if k.split('/')[0] == base:
+                return v
+        return None
 
     def is_emergency_sell(self, binance_symbol: str, sell_threshold: float = -0.60) -> Tuple[bool, str]:
         """

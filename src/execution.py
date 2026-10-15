@@ -2,8 +2,9 @@ import ccxt
 import time
 import logging
 from typing import Optional, Callable, Any
-from .config import DRY_RUN, MAX_SPREAD_PCT
+from .config import DRY_RUN, BNB_FEE_RESERVE
 from .portfolio import PortfolioManager
+from . import database
 
 logger = logging.getLogger(__name__)
 
@@ -51,23 +52,8 @@ class ExecutionManager:
             min_qty = market.get('limits', {}).get('amount', {}).get('min', 0.0)
             
             ticker = self._fetch_ticker(symbol)
-            price = ticker.get('last') or ticker.get('close')
-            bid = ticker.get('bid') or 0.0
-            ask = ticker.get('ask') or 0.0
-
-            if side == 'buy':
-                # Order Book Spread Gate: protect micro-capital from illiquid altcoin slippage
-                if bid > 0.0 and ask > 0.0:
-                    spread_pct = (ask - bid) / bid
-                    if spread_pct > MAX_SPREAD_PCT:
-                        logger.warning(
-                            f"[{symbol}] Spread gate triggered: {spread_pct*100:.3f}% > {MAX_SPREAD_PCT*100:.2f}% "
-                            f"(Bid: {bid}, Ask: {ask}). BUY order rejected."
-                        )
-                        return None
-                    # Use ask as precise buy entry price reference
-                    price = ask
-
+            price = ticker['last']
+            
             if not price:
                 logger.error(f"Could not fetch latest price for {symbol} execution.")
                 return None
@@ -134,16 +120,33 @@ class ExecutionManager:
 
             elif side == 'sell':
                 amount = 0.0
+                sell_qty = 0.0
                 if self.portfolio:
                     try:
                         balances = self.portfolio.fetch_balances()
                         avail_base = balances.get(base, {}).get('free', 0.0) if isinstance(balances, dict) else 0.0
                         
-                        if avail_base <= 0.0:
-                            logger.info(f"No active position to SELL for {symbol} (holding 0 {base}). Returning dust/cleared status.")
+                        # Preserve BNB fee reserve so Binance fee discounts are never lost
+                        if base == 'BNB':
+                            reserve = BNB_FEE_RESERVE
+                            avail_base = max(0.0, avail_base - reserve)
+                            logger.info(f"[BNB Reserve Shield] Preserving {reserve:.4f} BNB for fees; available to sell: {avail_base:.4f} BNB")
+
+                        # If position tracker has an open position with tracked amount, cap sell amount to position size
+                        pos = database.get_open_position(symbol)
+                        if pos and pos.get('amount') and float(pos['amount']) > 0:
+                            target_amount = float(pos['amount'])
+                            sell_qty = min(avail_base, target_amount)
+                        elif amount_usd > 0:
+                            sell_qty = min(avail_base, amount_usd / price)
+                        else:
+                            sell_qty = avail_base
+
+                        if sell_qty <= 0.0:
+                            logger.info(f"No active position to SELL for {symbol} (holding 0 {base} above reserve). Returning dust/cleared status.")
                             return {'status': 'cleared_dust', 'side': 'sell', 'price': price, 'amount': 0.0, 'quote': quote}
                             
-                        amount = float(self.exchange.amount_to_precision(symbol, avail_base))
+                        amount = float(self.exchange.amount_to_precision(symbol, sell_qty))
                         
                         if amount < min_qty:
                             logger.info(f"No active position to SELL for {symbol} (holding {amount} {base} < minQty {min_qty}). Returning dust/cleared status.")
@@ -151,14 +154,15 @@ class ExecutionManager:
                             
                         final_cost = amount * price
                         if final_cost < min_cost:
-                            logger.info(f"No active position to SELL for {symbol} (holding {avail_base} {base} worth < minNotional {min_cost} {quote}). Returning dust/cleared status.")
+                            logger.info(f"No active position to SELL for {symbol} (holding {amount} {base} worth < minNotional {min_cost} {quote}). Returning dust/cleared status.")
                             return {'status': 'cleared_dust', 'side': 'sell', 'price': price, 'amount': 0.0, 'quote': quote}
                     except Exception as e:
                         logger.warning(f"Could not fetch balance for sell pre-check: {e}")
                         return None
                 else:
                     sell_usd = amount_usd if amount_usd > 0 else (self.capital if self.capital > 0 else 5.0)
-                    amount = float(self.exchange.amount_to_precision(symbol, sell_usd / price))
+                    sell_qty = sell_usd / price
+                    amount = float(self.exchange.amount_to_precision(symbol, sell_qty))
                     final_cost = amount * price
 
                 if self.dry_run:
@@ -177,7 +181,7 @@ class ExecutionManager:
                 except ccxt.InsufficientFunds as e:
                     logger.warning(f"Insufficient funds for {amount} {symbol}. Attempting to sell 99%...")
                     try:
-                        amount = float(self.exchange.amount_to_precision(symbol, avail_base * 0.99))
+                        amount = float(self.exchange.amount_to_precision(symbol, sell_qty * 0.99))
                         if amount < min_qty:
                             logger.info(f"99% of balance {amount} is less than minQty. Returning dust/cleared status.")
                             return {'status': 'cleared_dust', 'side': 'sell', 'price': price, 'amount': 0.0, 'quote': quote}

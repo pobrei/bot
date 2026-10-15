@@ -92,19 +92,67 @@ def test_tiered_trailing_stop_runner_mode():
     
     tracker.record_entry(symbol, entry_price=100.0, amount=1.0, quote="USDC", source="breakout")
     
-    # Price surges to 104.0 (+4.0%), activating runner mode (trail tightens to 0.6%)
+    # Price surges to 104.0 (+4.0%), activating runner mode (1.2% breathing trail with +1.2% floor)
     tracker.check_position_exit(symbol, current_price=104.0)
     
-    # 0.6% below peak 104.0 is: 104.0 * (1 - 0.006) = 103.376
-    # Price drops to 103.35 -> should trigger trailing stop and lock in > 3.3% gain!
+    # 1.2% below peak 104.0 is: 104.0 * (1 - 0.012) = 102.752
+    # Normal 15m noise down to 103.35 (-0.6%) should NOT choke the runner!
     exit_signal = tracker.check_position_exit(symbol, current_price=103.35)
+    assert exit_signal is None  # Runner continues breathing!
+
+    # Pullback below 102.752 (e.g. 102.70) triggers trailing stop, locking in +2.7%
+    exit_signal = tracker.check_position_exit(symbol, current_price=102.70)
     assert exit_signal is not None
     exit_type, reason, pnl_pct = exit_signal
     assert exit_type == "TRAILING_STOP"
-    assert pnl_pct >= 3.3  # Locked in massive runner gain!
+    assert pnl_pct >= 2.6
     
     database.remove_position(symbol)
     database.clear_symbol_cooldown(symbol)
+
+def test_stagnation_timeout_and_cooldown():
+    from datetime import datetime, timedelta
+    from src.position_tracker import PositionTracker
+    tracker = PositionTracker()
+    symbol = "STAGNANT/USDC"
+    
+    database.clear_symbol_cooldown(symbol)
+    database.remove_position(symbol)
+
+    # Record entry 5 hours ago (elapsed > 4h = 14400s)
+    old_time = (datetime.now() - timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+    pos_data = {
+        "symbol": symbol,
+        "entry_price": 10.0,
+        "peak_price": 10.08, # Only +0.8%, never reached 1.5% activation
+        "amount": 1.0,
+        "quote": "USDC",
+        "trailing_active": False,
+        "entry_time": old_time,
+        "source": "breakout"
+    }
+    database.upsert_position(pos_data)
+
+    # Current price is 10.01 (+0.1% gain, stagnant)
+    exit_signal = tracker.check_position_exit(symbol, current_price=10.01)
+    assert exit_signal is not None
+    exit_type, reason, pnl_pct = exit_signal
+    assert exit_type == "STAGNATION_TIMEOUT"
+    assert "Stagnation timeout" in reason
+
+    # Record exit and verify cooldown is 1 hour (3600s), NOT 4 hours!
+    tracker.record_exit(symbol, exit_price=10.01, reason=f"{exit_type}: {reason}")
+    is_cool, cool_reason = database.is_symbol_in_cooldown(symbol)
+    assert is_cool is True
+    assert "Stagnation Cooldown (1h)" in cool_reason
+
+    cooldowns = database.get_active_cooldowns()
+    target = next((c for c in cooldowns if c["symbol"] == symbol), None)
+    assert target is not None
+    assert 58 <= target["mins_remaining"] <= 60
+
+    database.clear_symbol_cooldown(symbol)
+    database.remove_position(symbol)
 
 def test_zero_equity_snapshot_shield_and_cache():
     # 1. Snapshot shielding: zero and negative values must be rejected
@@ -133,11 +181,11 @@ def test_breakout_anti_exhaustion_filter():
     
     strategy = Strategy()
     df = pd.DataFrame({
-        'open': [100.0]*28 + [102.0, 102.0],
-        'close': [100.0]*28 + [108.0, 108.0],
-        'high': [101.0]*28 + [109.0, 109.0],
-        'low': [99.0]*28 + [101.0, 101.0],
-        'volume': [1000.0]*28 + [5000.0, 5000.0]  # Massive volume breakout on closed bar
+        'open': [100.0]*29 + [102.0],
+        'close': [100.0]*29 + [108.0],
+        'high': [101.0]*29 + [109.0],
+        'low': [99.0]*29 + [101.0],
+        'volume': [1000.0]*29 + [5000.0]  # Massive volume breakout
     })
     
     with patch('src.strategy.ta.rsi') as mock_rsi, \
@@ -150,12 +198,12 @@ def test_breakout_anti_exhaustion_filter():
         mock_adx.return_value = pd.DataFrame({'ADX_14': [35.0]*30}) # TRENDING
         
         # Case A: Exhausted blow-off top (RSI = 85 like the SAND pump) -> MUST BE REJECTED!
-        mock_rsi.return_value = pd.Series([60.0]*28 + [85.0, 85.0])
+        mock_rsi.return_value = pd.Series([60.0]*29 + [85.0])
         res_exhausted = strategy.evaluate("EXHAUST/USDC", df)
         assert res_exhausted['signal'] == 'HOLD'
         
         # Case B: Fresh breakout (RSI = 65, healthy momentum) -> MUST TRIGGER BUY!
-        mock_rsi.return_value = pd.Series([55.0]*28 + [65.0, 65.0])
+        mock_rsi.return_value = pd.Series([55.0]*29 + [65.0])
         res_fresh = strategy.evaluate("FRESH/USDC", df)
         assert res_fresh['signal'] == 'BUY'
         assert res_fresh['source'] == 'breakout'

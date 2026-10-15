@@ -72,5 +72,57 @@ class TestRiskExecution(unittest.TestCase):
         self.assertIn("Equity floor breached", reason)
         self.mock_kill.assert_called_with(True)
 
+    def test_bnb_fee_reserve_shield_in_execution(self):
+        from src.execution import ExecutionManager
+        from src import database
+        
+        mock_ex = MagicMock()
+        mock_ex.amount_to_precision = lambda sym, amt: str(round(amt, 4))
+        mock_ex.price_to_precision = lambda sym, pr: str(round(pr, 2))
+        mock_ex.market.return_value = {
+            'limits': {
+                'amount': {'min': 0.001},
+                'cost': {'min': 5.0}
+            }
+        }
+        mock_ex.fetch_ticker.return_value = {'last': 700.0}
+
+        port = PortfolioManager(mock_ex)
+        # Total BNB is 0.020 (value ~$14.00)
+        port.fetch_balances = MagicMock(return_value={'BNB': {'free': 0.020}})
+        
+        executor = ExecutionManager(mock_ex, port)
+        executor.dry_run = True
+
+        # Case 1: Open position of 0.008 BNB exists. Sell must only sell 0.008, NOT 0.020!
+        database.upsert_position({
+            "symbol": "BNB/USDC",
+            "entry_price": 700.0,
+            "peak_price": 700.0,
+            "amount": 0.008,
+            "quote": "USDC",
+            "trailing_active": False,
+            "entry_time": "2026-10-15 00:00:00",
+            "source": "breakout"
+        })
+        
+        res = executor.execute_order("BNB/USDC", "sell")
+        self.assertIsNotNone(res)
+        self.assertEqual(res['amount'], 0.008)
+
+        # Case 2: No position tracked, free BNB = 0.020.
+        # Must preserve 0.005 reserve and only sell 0.015!
+        database.remove_position("BNB/USDC")
+        res = executor.execute_order("BNB/USDC", "sell")
+        self.assertIsNotNone(res)
+        self.assertEqual(res['amount'], 0.015)
+
+        # Case 3: Free BNB is 0.004 (< 0.005 reserve). Must protect reserve and NOT sell!
+        port.fetch_balances = MagicMock(return_value={'BNB': {'free': 0.004}})
+        res = executor.execute_order("BNB/USDC", "sell")
+        self.assertEqual(res['status'], 'cleared_dust')
+        self.assertEqual(res['amount'], 0.0)
+
 if __name__ == '__main__':
     unittest.main()
+

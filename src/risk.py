@@ -1,14 +1,8 @@
 import logging
 import time
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional
 from datetime import datetime
-from .config import (
-    CAPITAL_PER_TRADE,
-    ATR_SL_MULTIPLIER,
-    ATR_TP_MR_MULTIPLIER,
-    ATR_TP_MOM_MULTIPLIER,
-    MAX_LOSS_CAP_PCT
-)
+from .config import CAPITAL_PER_TRADE
 from .portfolio import PortfolioManager
 from .database import (
     get_trade_history, 
@@ -144,30 +138,3 @@ class RiskEngine:
             return False, f"Available quote insufficient to meet min notional {self.min_notional}", 0.0
             
         return True, "Valid", size
-
-    def calculate_dynamic_targets(self, entry_price: float, atr: float, strategy_source: str = 'breakout') -> Dict[str, float]:
-        """
-        Calculates ATR-dynamic Stop-Loss and Take-Profit targets.
-        - Mean Reversion: SL = max(entry - 1.5 * ATR, entry * 0.975), TP = entry + 2.0 * ATR
-        - Momentum Breakout: SL = max(entry - 1.5 * ATR, entry * 0.975), TP = entry + 3.5 * ATR, Trail = 1.5 * ATR
-        """
-        is_trend_or_swing = any(k in strategy_source.lower() for k in ["breakout", "revolut", "swing"])
-        sl_cap = entry_price * (1.0 - MAX_LOSS_CAP_PCT / 100.0)
-        
-        if atr > 0:
-            sl_price = max(entry_price - ATR_SL_MULTIPLIER * atr, sl_cap)
-            tp_mult = ATR_TP_MOM_MULTIPLIER if is_trend_or_swing else ATR_TP_MR_MULTIPLIER
-            tp_price = entry_price + tp_mult * atr
-            trail_distance = ATR_SL_MULTIPLIER * atr
-        else:
-            sl_price = sl_cap
-            tp_price = entry_price * (1.05 if is_trend_or_swing else 1.025)
-            trail_distance = entry_price * 0.010
-
-        return {
-            "stop_loss_price": sl_price,
-            "take_profit_price": tp_price,
-            "trail_distance": trail_distance,
-            "atr": atr
-        }
-

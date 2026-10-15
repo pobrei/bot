@@ -17,16 +17,9 @@ def set_db_path(path: str):
     global DB_PATH
     DB_PATH = path
 
-def get_connection(timeout: float = 10.0) -> sqlite3.Connection:
-    """Thread-safe SQLite connection manager with WAL mode and 10s busy timeout."""
-    conn = sqlite3.connect(get_db_path(), timeout=timeout)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=10000;")
-    return conn
-
 def init_db():
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             
             # Cooldown table to prevent re-entering recently stopped out pairs
@@ -48,11 +41,7 @@ def init_db():
                     quote TEXT,
                     trailing_active BOOLEAN,
                     entry_time TEXT,
-                    source TEXT,
-                    atr REAL DEFAULT 0.0,
-                    stop_loss_price REAL DEFAULT 0.0,
-                    take_profit_price REAL DEFAULT 0.0,
-                    ratcheted BOOLEAN DEFAULT 0
+                    source TEXT
                 )
             ''')
 
@@ -65,14 +54,6 @@ def init_db():
                 cursor.execute("ALTER TABLE positions ADD COLUMN peak_price REAL")
             if 'source' not in existing_cols:
                 cursor.execute("ALTER TABLE positions ADD COLUMN source TEXT DEFAULT 'unknown'")
-            if 'atr' not in existing_cols:
-                cursor.execute("ALTER TABLE positions ADD COLUMN atr REAL DEFAULT 0.0")
-            if 'stop_loss_price' not in existing_cols:
-                cursor.execute("ALTER TABLE positions ADD COLUMN stop_loss_price REAL DEFAULT 0.0")
-            if 'take_profit_price' not in existing_cols:
-                cursor.execute("ALTER TABLE positions ADD COLUMN take_profit_price REAL DEFAULT 0.0")
-            if 'ratcheted' not in existing_cols:
-                cursor.execute("ALTER TABLE positions ADD COLUMN ratcheted BOOLEAN DEFAULT 0")
 
             
             # Trade history table
@@ -141,7 +122,7 @@ def init_db():
 
 def get_kill_switch() -> bool:
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM bot_state WHERE key = 'kill_switch'")
             row = cursor.fetchone()
@@ -154,7 +135,7 @@ def get_kill_switch() -> bool:
 
 def set_kill_switch(is_killed: bool):
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             val = 'true' if is_killed else 'false'
             cursor.execute("UPDATE bot_state SET value = ? WHERE key = 'kill_switch'", (val,))
@@ -166,7 +147,7 @@ def set_symbol_cooldown(symbol: str, duration_seconds: float = 7200.0, reason: s
     """Sets a cooldown on a symbol to prevent immediate re-entry after an exit or stop-loss."""
     until = time.time() + duration_seconds
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO symbol_cooldowns (symbol, until_timestamp, reason)
@@ -184,7 +165,7 @@ def is_symbol_in_cooldown(symbol: str) -> Tuple[bool, str]:
     """Returns (True, reason) if symbol is currently in cooldown, otherwise (False, '')."""
     now = time.time()
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT until_timestamp, reason FROM symbol_cooldowns WHERE symbol = ?', (symbol,))
             row = cursor.fetchone()
@@ -202,7 +183,7 @@ def is_symbol_in_cooldown(symbol: str) -> Tuple[bool, str]:
 
 def clear_symbol_cooldown(symbol: str):
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM symbol_cooldowns WHERE symbol = ?', (symbol,))
             conn.commit()
@@ -214,7 +195,7 @@ def get_active_cooldowns() -> List[Dict[str, Any]]:
     now = time.time()
     results = []
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT symbol, until_timestamp, reason FROM symbol_cooldowns')
             for symbol, until, reason in cursor.fetchall():
@@ -236,7 +217,7 @@ def get_active_cooldowns() -> List[Dict[str, Any]]:
 def get_open_positions() -> Dict[str, Any]:
     positions = {}
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM positions")
@@ -249,11 +230,7 @@ def get_open_positions() -> Dict[str, Any]:
                     "quote": row['quote'],
                     "trailing_active": bool(row['trailing_active']),
                     "entry_time": row['entry_time'],
-                    "source": row['source'] if 'source' in row.keys() else "unknown",
-                    "atr": float(row['atr']) if ('atr' in row.keys() and row['atr'] is not None) else 0.0,
-                    "stop_loss_price": float(row['stop_loss_price']) if ('stop_loss_price' in row.keys() and row['stop_loss_price'] is not None) else 0.0,
-                    "take_profit_price": float(row['take_profit_price']) if ('take_profit_price' in row.keys() and row['take_profit_price'] is not None) else 0.0,
-                    "ratcheted": bool(row['ratcheted']) if ('ratcheted' in row.keys() and row['ratcheted'] is not None) else False
+                    "source": row['source'] if 'source' in row.keys() else "unknown"
                 }
     except Exception as e:
         logger.error(f"Error reading positions from DB: {e}")
@@ -261,7 +238,7 @@ def get_open_positions() -> Dict[str, Any]:
 
 def get_open_position(symbol: str) -> Optional[Dict[str, Any]]:
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM positions WHERE symbol = ?", (symbol,))
@@ -275,11 +252,7 @@ def get_open_position(symbol: str) -> Optional[Dict[str, Any]]:
                     "quote": row['quote'],
                     "trailing_active": bool(row['trailing_active']),
                     "entry_time": row['entry_time'],
-                    "source": row['source'] if 'source' in row.keys() else "unknown",
-                    "atr": float(row['atr']) if ('atr' in row.keys() and row['atr'] is not None) else 0.0,
-                    "stop_loss_price": float(row['stop_loss_price']) if ('stop_loss_price' in row.keys() and row['stop_loss_price'] is not None) else 0.0,
-                    "take_profit_price": float(row['take_profit_price']) if ('take_profit_price' in row.keys() and row['take_profit_price'] is not None) else 0.0,
-                    "ratcheted": bool(row['ratcheted']) if ('ratcheted' in row.keys() and row['ratcheted'] is not None) else False
+                    "source": row['source'] if 'source' in row.keys() else "unknown"
                 }
     except Exception as e:
         logger.error(f"Error reading position {symbol} from DB: {e}")
@@ -287,25 +260,17 @@ def get_open_position(symbol: str) -> Optional[Dict[str, Any]]:
 
 def upsert_position(pos: Dict[str, Any]):
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO positions (
-                    symbol, entry_price, peak_price, amount, quote, 
-                    trailing_active, entry_time, source, atr, 
-                    stop_loss_price, take_profit_price, ratcheted
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO positions (symbol, entry_price, peak_price, amount, quote, trailing_active, entry_time, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     peak_price=excluded.peak_price,
-                    trailing_active=excluded.trailing_active,
-                    stop_loss_price=excluded.stop_loss_price,
-                    take_profit_price=excluded.take_profit_price,
-                    ratcheted=excluded.ratcheted
+                    trailing_active=excluded.trailing_active
             ''', (
                 pos['symbol'], pos['entry_price'], pos['peak_price'], 
-                pos['amount'], pos['quote'], pos['trailing_active'], pos['entry_time'], pos.get('source', 'unknown'),
-                pos.get('atr', 0.0), pos.get('stop_loss_price', 0.0), pos.get('take_profit_price', 0.0), bool(pos.get('ratcheted', False))
+                pos['amount'], pos['quote'], pos['trailing_active'], pos['entry_time'], pos.get('source', 'unknown')
             ))
             conn.commit()
     except Exception as e:
@@ -313,7 +278,7 @@ def upsert_position(pos: Dict[str, Any]):
 
 def remove_position(symbol: str):
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM positions WHERE symbol = ?", (symbol,))
             conn.commit()
@@ -323,7 +288,7 @@ def remove_position(symbol: str):
 def get_trade_history() -> List[Dict[str, Any]]:
     history = []
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trade_history ORDER BY id ASC")
@@ -336,7 +301,7 @@ def get_trade_history() -> List[Dict[str, Any]]:
 def get_last_trade(symbol: str) -> Optional[Dict[str, Any]]:
     """Returns the most recent trade record for the symbol, if any."""
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trade_history WHERE symbol = ? ORDER BY id DESC LIMIT 1", (symbol,))
@@ -349,7 +314,7 @@ def get_last_trade(symbol: str) -> Optional[Dict[str, Any]]:
 
 def insert_trade_history(trade: Dict[str, Any]):
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO trade_history (symbol, entry_time, exit_time, entry_price, exit_price, amount, quote, pnl_pct, realized_pnl, reason)
@@ -369,7 +334,7 @@ def record_equity_snapshot(equity: float):
         return
     now_str = datetime.now().isoformat()
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO equity_snapshots (timestamp, equity)
@@ -382,7 +347,7 @@ def record_equity_snapshot(equity: float):
 def get_equity_snapshots(hours: int = 24) -> List[Dict[str, Any]]:
     snapshots = []
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             # Simple approach: fetch all and filter in Python, or use datetime in SQLite
@@ -401,7 +366,7 @@ def get_equity_snapshots(hours: int = 24) -> List[Dict[str, Any]]:
 
 def save_portfolio_state(total_equity: float, balances: Dict[str, Any]):
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT OR REPLACE INTO portfolio_state (id, total_equity, balances_json)
@@ -413,7 +378,7 @@ def save_portfolio_state(total_equity: float, balances: Dict[str, Any]):
 
 def get_portfolio_state() -> Tuple[float, Dict[str, Any]]:
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT total_equity, balances_json FROM portfolio_state WHERE id = 1")
@@ -449,7 +414,7 @@ def save_market_candles(symbol: str, timeframe: str, df: Any, regime: str = "UNK
         data_json = df_save.to_json(orient='split')
         now_str = datetime.now().isoformat()
         
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT OR REPLACE INTO market_candles (symbol, timeframe, data_json, regime, updated_at)
@@ -467,7 +432,7 @@ def get_market_candles(symbol: str, timeframe: str = "1h") -> Optional[Tuple[Any
     try:
         import io
         import pandas as pd
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
@@ -488,7 +453,7 @@ def get_cached_market_symbols(timeframe: Optional[str] = None) -> List[str]:
     """
     symbols = []
     try:
-        with get_connection() as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             if timeframe:
                 cursor.execute("SELECT DISTINCT symbol FROM market_candles WHERE timeframe = ? ORDER BY symbol ASC", (timeframe,))

@@ -154,20 +154,12 @@ with col_right:
         pos_list = []
         for sym, pos in open_positions.items():
             source_strat = pos.get("source", "unknown")
-            ts_status = "🟢 1.5*ATR trail" if source_strat == "breakout" else ("🟢 YES" if pos.get("trailing_active") else "⚪ Pending (+1.5%)")
-            sl_val = pos.get('stop_loss_price', 0.0)
-            sl_text = f"{sl_val:.4f}" if sl_val > 0 else "N/A"
-            if pos.get('ratcheted'):
-                sl_text += " 🛡️ (BE Lock +0.3%)"
-            tp_val = pos.get('take_profit_price', 0.0)
-            tp_text = f"{tp_val:.4f}" if tp_val > 0 else "Dynamic"
+            ts_status = "🟢 1.2% from peak" if source_strat == "breakout" else ("🟢 YES" if pos.get("trailing_active") else "⚪ Pending (+1.5%)")
             pos_list.append({
                 "Symbol": sym,
                 "Strategy": source_strat.replace("_", " ").title(),
                 "Entry Price": f"{pos['entry_price']:.4f}",
                 "Highest Peak": f"{pos.get('peak_price', pos['entry_price']):.4f}",
-                "Stop-Loss": sl_text,
-                "Take-Profit": tp_text,
                 "Position Size": f"{pos['amount']} {sym.split('/')[0]}",
                 "Trailing Stop": ts_status,
                 "Entry Time": pos.get("entry_time", "N/A")

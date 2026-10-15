@@ -37,19 +37,13 @@ def get_default_min_atr_ratio(tf: str = "15m") -> float:
 _default_atr = str(get_default_min_atr_ratio(TIMEFRAME))
 MIN_ATR_RATIO = float(os.getenv("MIN_ATR_RATIO", _default_atr))
 
-# Quantitative Strategy & Execution Gates
-MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0018"))                 # 0.18% max allowed order book spread
-BTC_CRASH_DROP_PCT = float(os.getenv("BTC_CRASH_DROP_PCT", "1.2"))           # 1.2% BTC dump threshold
-BREAKEVEN_RATCHET_TRIGGER_PCT = float(os.getenv("BREAKEVEN_RATCHET_TRIGGER_PCT", "1.2")) # +1.2% unrealized gain triggers fee lock
-BREAKEVEN_RATCHET_LOCK_PCT = float(os.getenv("BREAKEVEN_RATCHET_LOCK_PCT", "0.3"))       # +0.3% stop-loss fee lock
-ATR_SL_MULTIPLIER = float(os.getenv("ATR_SL_MULTIPLIER", "1.5"))             # 1.5 * ATR stop loss
-ATR_TP_MR_MULTIPLIER = float(os.getenv("ATR_TP_MR_MULTIPLIER", "2.0"))       # 2.0 * ATR take profit for Mean Reversion
-ATR_TP_MOM_MULTIPLIER = float(os.getenv("ATR_TP_MOM_MULTIPLIER", "3.5"))     # 3.5 * ATR take profit for Momentum Breakout
-MAX_LOSS_CAP_PCT = float(os.getenv("MAX_LOSS_CAP_PCT", "2.5"))               # 2.5% max stop loss floor
-
 # Revolut Signal Bridge (Gemini AI Sentiment & Multi-Timeframe Signals)
 USE_REVOLUT_SIGNALS = os.getenv("USE_REVOLUT_SIGNALS", "True").lower() in ("true", "1", "t", "yes")
 REVOLUT_API_URL = os.getenv("REVOLUT_API_URL", "http://127.0.0.1:8000")
 REVOLUT_DB_PATH = os.getenv("REVOLUT_DB_PATH", "/Users/filippsh/dev/revolutbot/revolut_signals.db")
 REVOLUT_MIN_SCORE = float(os.getenv("REVOLUT_MIN_SCORE", "0.35"))
+MIN_AI_CONFLUENCE_SCORE = float(os.getenv("MIN_AI_CONFLUENCE_SCORE", "0.20"))
+
+# Fee Optimization
+BNB_FEE_RESERVE = float(os.getenv("BNB_FEE_RESERVE", "0.005"))  # Minimum BNB balance preserved for trading fee discounts
 
