@@ -123,6 +123,49 @@ class TestRiskExecution(unittest.TestCase):
         self.assertEqual(res['status'], 'cleared_dust')
         self.assertEqual(res['amount'], 0.0)
 
+    def test_conviction_tier1_single_slot_power(self):
+        # Scenario: Total equity $30, free quote $28, 0 active positions, A+ setup
+        self.portfolio.get_total_equity_usd = MagicMock(return_value=30.0)
+        self.portfolio.get_available_quote_balance = MagicMock(return_value=28.0)
+        self.portfolio.fetch_balances = MagicMock(return_value={'BNB': {'free': 0.010}})
+
+        size = self.risk_engine.calculate_position_size(
+            active_positions_count=0,
+            priority_score=90.0,
+            source="ai_pullback+revolut_ai"
+        )
+        # Sizing should be significantly larger than the standard $6.50 (e.g. >= $12.0)
+        self.assertGreaterEqual(size, 12.0)
+        self.assertLessEqual(size, 14.0)
+
+    def test_conviction_tier1_with_active_slot(self):
+        # Scenario: 1 position already active, A+ signal arrives, spendable quote $15
+        self.portfolio.get_total_equity_usd = MagicMock(return_value=30.0)
+        self.portfolio.get_available_quote_balance = MagicMock(return_value=15.0)
+        self.portfolio.fetch_balances = MagicMock(return_value={'BNB': {'free': 0.010}})
+
+        size = self.risk_engine.calculate_position_size(
+            active_positions_count=1,
+            priority_score=85.0,
+            source="ai_pullback+revolut_ai"
+        )
+        self.assertGreaterEqual(size, 11.0)
+        self.assertLessEqual(size, 12.5)
+
+    def test_conviction_tier3_speculative(self):
+        # Scenario: Speculative mean reversion bounce (low score), should clamp to min notional ($6.00)
+        self.portfolio.get_total_equity_usd = MagicMock(return_value=30.0)
+        self.portfolio.get_available_quote_balance = MagicMock(return_value=20.0)
+        self.portfolio.fetch_balances = MagicMock(return_value={'BNB': {'free': 0.010}})
+
+        size = self.risk_engine.calculate_position_size(
+            active_positions_count=0,
+            priority_score=5.0,
+            source="mean_reversion"
+        )
+        self.assertAlmostEqual(size, 6.0, places=1)
+
 if __name__ == '__main__':
     unittest.main()
+
 

@@ -2,7 +2,14 @@ import logging
 import time
 from typing import Tuple, Optional
 from datetime import datetime
-from .config import CAPITAL_PER_TRADE
+from .config import (
+    CAPITAL_PER_TRADE,
+    CONVICTION_SIZING_ENABLED,
+    TIER1_A_PLUS_MAX_SIZE,
+    TIER2_STANDARD_SIZE,
+    TIER3_SPECULATIVE_SIZE,
+    SINGLE_SLOT_POWER_SIZE
+)
 from .portfolio import PortfolioManager
 from .database import (
     get_trade_history, 
@@ -18,7 +25,7 @@ class RiskEngine:
     def __init__(self, portfolio: PortfolioManager):
         self.portfolio = portfolio
         self.max_positions = 2
-        self.sizing_ratio = 0.25  # Max 25% equity per position to limit stop-loss downside to ~$0.16
+        self.sizing_ratio = 0.25  # Standard 25% equity per position
         self.min_notional = 6.00
         self.equity_floor = 20.00
         self.max_drawdown_pct = 5.0
@@ -54,9 +61,18 @@ class RiskEngine:
 
         return True, "Safe"
 
-    def calculate_position_size(self, active_positions_count: int, quote: str = 'USDC') -> float:
+    def calculate_position_size(
+        self, 
+        active_positions_count: int, 
+        quote: str = 'USDC',
+        priority_score: float = 0.0,
+        source: str = ""
+    ) -> float:
         """
-        Calculates dynamic order size clamped to min notional, CAPITAL_PER_TRADE, and available balance.
+        Calculates conviction-weighted order size clamped to min notional, risk limits, and spendable balance.
+        Tier 1 (A+ Ultra-Conviction): Score >= 70 or Revolut AI high-confluence -> ~$10.00 - $12.50 (or $13.50 if 0 active positions)
+        Tier 2 (Standard Confirmed): Score 20 - 70 -> ~$6.50 - $7.50
+        Tier 3 (Speculative / Mean Reversion): Score < 20 -> ~$5.80 - $6.00
         Subtracts BNB fee reserve (~$3) from spendable capital per risk rules.
         """
         total_equity = self.portfolio.get_total_equity_usd()
@@ -77,24 +93,53 @@ class RiskEngine:
         spendable = max(0.0, available_quote - bnb_reserve_needed)
         available_slots = max(1, self.max_positions - active_positions_count)
         allocation_per_slot = spendable / available_slots
-        
-        # Sizing rules:
-        # 1. Base target is CAPITAL_PER_TRADE (e.g. 6.50 USDC)
-        # 2. Hard cap per trade: 25% of total account equity (e.g. on $30 equity, max $7.50)
-        # 3. Minimum notional: self.min_notional ($6.00)
-        configured_size = CAPITAL_PER_TRADE if (CAPITAL_PER_TRADE and CAPITAL_PER_TRADE > 0) else 6.50
-        max_account_risk = max(self.min_notional, total_equity * self.sizing_ratio)
-        target_size = min(max(configured_size, self.min_notional), max_account_risk)
-        
-        # Final effective size cannot exceed available quote in slot
+
+        # Determine Conviction Tier
+        is_tier1 = (priority_score >= 70.0) or ("revolut_ai" in source.lower() and priority_score >= 45.0)
+        is_tier3 = (priority_score < 20.0 and "mean_reversion" in source.lower())
+
+        if CONVICTION_SIZING_ENABLED and is_tier1:
+            # Single-Slot Power Mode: If 0 positions currently active, allocate larger power size
+            if active_positions_count == 0:
+                base_target = SINGLE_SLOT_POWER_SIZE
+                max_account_risk = total_equity * 0.45  # Up to 45% equity on single-slot power mode
+            else:
+                base_target = TIER1_A_PLUS_MAX_SIZE
+                max_account_risk = total_equity * 0.40  # Up to 40% equity for Tier 1
+            tier_name = "Tier 1 (A+ Ultra-Conviction)"
+        elif CONVICTION_SIZING_ENABLED and is_tier3:
+            base_target = TIER3_SPECULATIVE_SIZE
+            max_account_risk = max(self.min_notional, total_equity * 0.20)
+            tier_name = "Tier 3 (Speculative / Mean Reversion)"
+        else:
+            base_target = TIER2_STANDARD_SIZE if TIER2_STANDARD_SIZE else (CAPITAL_PER_TRADE if CAPITAL_PER_TRADE > 0 else 6.50)
+            max_account_risk = max(self.min_notional, total_equity * self.sizing_ratio)
+            tier_name = "Tier 2 (Standard Confirmed)"
+
+        target_size = min(max(base_target, self.min_notional), max(self.min_notional, max_account_risk))
+
+        # Final effective size cannot exceed available quote in slot (or spendable quote)
         size = min(target_size, allocation_per_slot)
-        
+
+        logger.info(
+            f"[BUDGET SIZING] Conviction: {tier_name} | Target: ${target_size:.2f} | Allocated: ${size:.2f} | "
+            f"Spendable: ${spendable:.2f} (Score: {priority_score:.1f}, Source: {source})"
+        )
+
         if size < self.min_notional:
             logger.warning(f"RiskEngine: Desired size {size:.2f} is less than {self.min_notional}. Cannot allocate.")
-            
+
         return size
 
-    def validate_entry(self, symbol: str, active_positions_count: int, quote: str = 'USDC', current_price: float = 0.0) -> Tuple[bool, str, float]:
+    def validate_entry(
+        self, 
+        symbol: str, 
+        active_positions_count: int, 
+        quote: str = 'USDC', 
+        current_price: float = 0.0,
+        priority_score: float = 0.0,
+        source: str = ""
+    ) -> Tuple[bool, str, float]:
         """
         Validates if we can enter a new position and returns the allowed size.
         Returns (is_valid, reason, size_usd).
@@ -128,11 +173,21 @@ class RiskEngine:
         if not is_safe:
             return False, f"Circuit Breaker Triggered: {cb_reason}", 0.0
             
-        size = self.calculate_position_size(active_positions_count, quote)
+        size = self.calculate_position_size(
+            active_positions_count, 
+            quote,
+            priority_score=priority_score,
+            source=source
+        )
         if size < self.min_notional:
             # Check if autonomous rebalancing can replenish quote from excess BNB
             if self.portfolio.auto_rebalance_quote(min_quote_required=self.min_notional):
-                size = self.calculate_position_size(active_positions_count, quote)
+                size = self.calculate_position_size(
+                    active_positions_count, 
+                    quote,
+                    priority_score=priority_score,
+                    source=source
+                )
 
         if size < self.min_notional:
             return False, f"Available quote insufficient to meet min notional {self.min_notional}", 0.0

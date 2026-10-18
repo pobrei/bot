@@ -336,7 +336,16 @@ def main(attempt: int = 0):
                         active_count = len(tracker.get_open_positions())
                         pair_quote = symbol.split('/')[1] if '/' in symbol else quote_sample
                         
-                        is_valid, reason, size_usd = risk_engine.validate_entry(symbol, active_count, pair_quote, current_price=current_price)
+                        priority_score = b_sig.get('priority_score', 0.0)
+                        
+                        is_valid, reason, size_usd = risk_engine.validate_entry(
+                            symbol, 
+                            active_count, 
+                            pair_quote, 
+                            current_price=current_price,
+                            priority_score=priority_score,
+                            source=source
+                        )
                         if is_valid:
                             res = executor.execute_order(symbol, 'buy', size_usd)
                             if res:

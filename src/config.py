@@ -13,6 +13,13 @@ TIMEFRAME = os.getenv("TIMEFRAME", "5m")
 CAPITAL_PER_TRADE = float(os.getenv("TRADE_AMOUNT", os.getenv("CAPITAL_EUR", "5.0")))
 CAPITAL_EUR = CAPITAL_PER_TRADE  # Alias for backward compatibility
 
+# Conviction-Based Dynamic Budget Sizing
+CONVICTION_SIZING_ENABLED = os.getenv("CONVICTION_SIZING_ENABLED", "True").lower() in ("true", "1", "t", "yes")
+TIER1_A_PLUS_MAX_SIZE = float(os.getenv("TIER1_A_PLUS_MAX_SIZE", "12.0"))     # Tier 1 (A+ Ultra-Conviction): ~$10 - $12
+TIER2_STANDARD_SIZE = float(os.getenv("TIER2_STANDARD_SIZE", "6.5"))         # Tier 2 (Standard Confirmed): ~$6.50
+TIER3_SPECULATIVE_SIZE = float(os.getenv("TIER3_SPECULATIVE_SIZE", "5.8"))   # Tier 3 (Speculative / Mean Reversion): ~$5.80
+SINGLE_SLOT_POWER_SIZE = float(os.getenv("SINGLE_SLOT_POWER_SIZE", "13.5"))   # Single-Slot Power Mode: up to $13.50 when 0 open positions
+
 # Dynamic Trailing Stop & Profit Targets (%)
 TRAILING_STOP_ACTIVATION = float(os.getenv("TRAILING_STOP_ACTIVATION", "2.0")) # Activate when profit >= 2.0%
 TRAILING_STOP_DISTANCE = float(os.getenv("TRAILING_STOP_DISTANCE", "1.5"))     # Trail 1.5% below peak for breathing room
