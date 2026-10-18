@@ -106,6 +106,10 @@ class Strategy:
         close_pos = (curr_close - curr_low) / candle_range if candle_range > 0 else 0.5
         is_bullish_candle = (curr_close >= curr_open) and (close_pos >= 0.60)
 
+        atr_series = ta.atr(micro_df['high'], micro_df['low'], micro_df['close'], length=14)
+        curr_atr = float(atr_series.iloc[-1]) if atr_series is not None and not pd.isna(atr_series.iloc[-1]) else 0.0
+        result['atr_pct'] = (curr_atr / curr_close) if curr_close > 0 else 0.0
+
         if has_volume_surge and is_trend_aligned and is_rsi_healthy and is_bullish_candle:
             result['signal'] = 'BUY'
             result['source'] = 'micro_momentum'
@@ -235,11 +239,14 @@ class Strategy:
         # Dynamic Price Spectrums
         atr = curr.get('ATR_14', 0)
         if atr > 0:
+            result['atr_pct'] = (atr / close) if close > 0 else 0.0
             buy_floor = min(curr[bbl], close - 0.75 * atr) if bbl else close - 0.75 * atr
             result['spectrum_buy'] = (buy_floor, close + 0.15 * atr)
             result['spectrum_sell_1'] = (close + 1.2 * atr, close + 1.8 * atr)
             result['spectrum_sell_2'] = (max(curr[bbu], close + 2.2 * atr) if bbu else close + 2.2 * atr, close + 2.8 * atr)
             result['invalidation'] = buy_floor - 1.0 * atr
+        else:
+            result['atr_pct'] = 0.0
 
         return result
 

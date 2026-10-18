@@ -18,7 +18,8 @@ from src.config import (
     MICRO_MOMENTUM_ENABLED,
     MICRO_TIMEFRAME,
     MICRO_SCAN_INTERVAL,
-    MICRO_VOLUME_SURGE_RATIO
+    MICRO_VOLUME_SURGE_RATIO,
+    PARTIAL_TP_RATIO
 )
 from src.market_data import MarketData
 from src.strategy import Strategy
@@ -153,16 +154,31 @@ def main(attempt: int = 0):
                     ticker = market_data.exchange.fetch_ticker(symbol)
                     current_price = ticker.get('last', 0.0)
                     if current_price:
-                        # 1. Trailing Stop / Hard Stop / Take Profit Exit
+                        # 1. Trailing Stop / Hard Stop / Take Profit / Partial TP Exit
                         exit_check = tracker.check_position_exit(symbol, current_price)
                         if exit_check:
                             exit_type, reason, pnl_pct = exit_check
-                            logger.warning(f"[{symbol}] {exit_type} TRIGGERED ({pnl_pct:+.2f}%): {reason}")
-                            res = executor.execute_order(symbol, 'sell')
-                            if res:
-                                exit_price = res.get('price', current_price)
-                                tracker.record_exit(symbol, exit_price, f"{exit_type}: {reason}")
-                                continue
+                            if exit_type == "PARTIAL_TAKE_PROFIT":
+                                logger.warning(f"[{symbol}] {exit_type} TRIGGERED ({pnl_pct:+.2f}%): {reason}")
+                                pos_info = open_positions.get(symbol, {})
+                                full_amount = pos_info.get('amount', 0.0)
+                                partial_sell_amount = full_amount * PARTIAL_TP_RATIO
+                                res = executor.execute_order(symbol, 'sell', amount=partial_sell_amount)
+                                if res and res.get('amount', 0.0) > 0:
+                                    sold_amt = res.get('amount', partial_sell_amount)
+                                    exit_p = res.get('price', current_price)
+                                    tracker.record_partial_exit(symbol, exit_p, sold_amt, reason)
+                                    continue
+                                else:
+                                    logger.error(f"[{symbol}] Partial sell execution failed or returned zero amount.")
+                                    continue
+                            else:
+                                logger.warning(f"[{symbol}] {exit_type} TRIGGERED ({pnl_pct:+.2f}%): {reason}")
+                                res = executor.execute_order(symbol, 'sell')
+                                if res:
+                                    exit_price = res.get('price', current_price)
+                                    tracker.record_exit(symbol, exit_price, f"{exit_type}: {reason}")
+                                    continue
 
                         # 2. Revolut AI Invalidation Early-Warning Check
                         if USE_REVOLUT_SIGNALS:
@@ -307,17 +323,30 @@ def main(attempt: int = 0):
                     database.save_market_candles(symbol, TIMEFRAME, df, regime)
                     plot_market_graph(symbol, df, TIMEFRAME)
 
+                    candle_atr_pct = eval_result.get('atr_pct', 0.0)
                     if signal == 'BUY':
                         if symbol not in open_positions:
                             buy_signals.append({
                                 'symbol': symbol,
                                 'current_price': current_price,
                                 'source': source,
-                                'priority_score': priority_score
+                                'priority_score': priority_score,
+                                'atr_pct': candle_atr_pct
                             })
                         else:
+                            if candle_atr_pct > 0:
+                                pos_data = open_positions[symbol]
+                                if pos_data.get('atr_pct', 0.0) == 0.0 or abs(pos_data.get('atr_pct', 0.0) - candle_atr_pct) > 0.0001:
+                                    pos_data['atr_pct'] = candle_atr_pct
+                                    database.upsert_position(pos_data)
                             logger.info(f"[{symbol}] Already holding position, skipping BUY.")
-                    elif signal == 'SELL':
+                    elif symbol in open_positions and candle_atr_pct > 0:
+                        pos_data = open_positions[symbol]
+                        if pos_data.get('atr_pct', 0.0) == 0.0 or abs(pos_data.get('atr_pct', 0.0) - candle_atr_pct) > 0.0001:
+                            pos_data['atr_pct'] = candle_atr_pct
+                            database.upsert_position(pos_data)
+
+                    if signal == 'SELL':
                         if symbol in open_positions:
                             pos_info = open_positions.get(symbol, {})
                             pos_source = pos_info.get('source', 'unknown')
@@ -358,7 +387,7 @@ def main(attempt: int = 0):
                                 fill_price = res.get('price', current_price)
                                 fill_amount = res.get('amount', 0.0)
                                 quote = res.get('quote', pair_quote)
-                                tracker.record_entry(symbol, fill_price, fill_amount, quote, source=source)
+                                tracker.record_entry(symbol, fill_price, fill_amount, quote, source=source, atr_pct=b_sig.get('atr_pct', 0.0))
                         else:
                             logger.info(f"[{symbol}] BUY skipped: {reason}")
 
@@ -420,7 +449,7 @@ def main(attempt: int = 0):
                                         m_fill_p = res.get('price', m_curr_p)
                                         m_fill_amt = res.get('amount', 0.0)
                                         m_quote = res.get('quote', m_pair_quote)
-                                        tracker.record_entry(m_sym, m_fill_p, m_fill_amt, m_quote, source=m_source)
+                                        tracker.record_entry(m_sym, m_fill_p, m_fill_amt, m_quote, source=m_source, atr_pct=micro_eval.get('atr_pct', 0.0))
                                         active_count = len(tracker.get_open_positions())
                                         if active_count >= risk_engine.max_positions:
                                             break

@@ -26,6 +26,13 @@ TRAILING_STOP_DISTANCE = float(os.getenv("TRAILING_STOP_DISTANCE", "1.5"))     #
 HARD_STOP_LOSS = float(os.getenv("HARD_STOP_LOSS", "1.6"))                     # Tightened hard stop at -1.6% to cut losses fast
 TAKE_PROFIT_TARGET = float(os.getenv("TAKE_PROFIT_TARGET", "5.0"))             # Fixed TP target at +5.0%
 
+# Phase 3: Smart Partial Profit Scale-Out & ATR-Adaptive Volatility Exits
+PARTIAL_TP_ENABLED = os.getenv("PARTIAL_TP_ENABLED", "True").lower() in ("true", "1", "t", "yes")
+PARTIAL_TP_GAIN_PCT = float(os.getenv("PARTIAL_TP_GAIN_PCT", "2.2"))          # Take 50% profit at +2.2% gain
+PARTIAL_TP_RATIO = float(os.getenv("PARTIAL_TP_RATIO", "0.5"))                # Scale out 50% of position
+MIN_PARTIAL_NOTIONAL = float(os.getenv("MIN_PARTIAL_NOTIONAL", "5.2"))        # Min USD notional per leg ($5.20 clears Binance $5 min)
+ATR_ADAPTIVE_EXITS_ENABLED = os.getenv("ATR_ADAPTIVE_EXITS_ENABLED", "True").lower() in ("true", "1", "t", "yes")
+
 # Macro Market Gate (suppress altcoin buys during Bitcoin dumps)
 BTC_GATE_ENABLED = os.getenv("BTC_GATE_ENABLED", "True").lower() in ("true", "1", "t", "yes")
 

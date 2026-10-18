@@ -41,7 +41,10 @@ def init_db():
                     quote TEXT,
                     trailing_active BOOLEAN,
                     entry_time TEXT,
-                    source TEXT
+                    source TEXT,
+                    partial_tp_taken BOOLEAN DEFAULT 0,
+                    breakeven_locked BOOLEAN DEFAULT 0,
+                    atr_pct REAL DEFAULT 0.0
                 )
             ''')
 
@@ -54,6 +57,12 @@ def init_db():
                 cursor.execute("ALTER TABLE positions ADD COLUMN peak_price REAL")
             if 'source' not in existing_cols:
                 cursor.execute("ALTER TABLE positions ADD COLUMN source TEXT DEFAULT 'unknown'")
+            if 'partial_tp_taken' not in existing_cols:
+                cursor.execute("ALTER TABLE positions ADD COLUMN partial_tp_taken BOOLEAN DEFAULT 0")
+            if 'breakeven_locked' not in existing_cols:
+                cursor.execute("ALTER TABLE positions ADD COLUMN breakeven_locked BOOLEAN DEFAULT 0")
+            if 'atr_pct' not in existing_cols:
+                cursor.execute("ALTER TABLE positions ADD COLUMN atr_pct REAL DEFAULT 0.0")
 
             
             # Trade history table
@@ -230,7 +239,10 @@ def get_open_positions() -> Dict[str, Any]:
                     "quote": row['quote'],
                     "trailing_active": bool(row['trailing_active']),
                     "entry_time": row['entry_time'],
-                    "source": row['source'] if 'source' in row.keys() else "unknown"
+                    "source": row['source'] if 'source' in row.keys() else "unknown",
+                    "partial_tp_taken": bool(row['partial_tp_taken']) if 'partial_tp_taken' in row.keys() and row['partial_tp_taken'] is not None else False,
+                    "breakeven_locked": bool(row['breakeven_locked']) if 'breakeven_locked' in row.keys() and row['breakeven_locked'] is not None else False,
+                    "atr_pct": float(row['atr_pct']) if 'atr_pct' in row.keys() and row['atr_pct'] is not None else 0.0
                 }
     except Exception as e:
         logger.error(f"Error reading positions from DB: {e}")
@@ -252,7 +264,10 @@ def get_open_position(symbol: str) -> Optional[Dict[str, Any]]:
                     "quote": row['quote'],
                     "trailing_active": bool(row['trailing_active']),
                     "entry_time": row['entry_time'],
-                    "source": row['source'] if 'source' in row.keys() else "unknown"
+                    "source": row['source'] if 'source' in row.keys() else "unknown",
+                    "partial_tp_taken": bool(row['partial_tp_taken']) if 'partial_tp_taken' in row.keys() and row['partial_tp_taken'] is not None else False,
+                    "breakeven_locked": bool(row['breakeven_locked']) if 'breakeven_locked' in row.keys() and row['breakeven_locked'] is not None else False,
+                    "atr_pct": float(row['atr_pct']) if 'atr_pct' in row.keys() and row['atr_pct'] is not None else 0.0
                 }
     except Exception as e:
         logger.error(f"Error reading position {symbol} from DB: {e}")
@@ -263,14 +278,21 @@ def upsert_position(pos: Dict[str, Any]):
         with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO positions (symbol, entry_price, peak_price, amount, quote, trailing_active, entry_time, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO positions (symbol, entry_price, peak_price, amount, quote, trailing_active, entry_time, source, partial_tp_taken, breakeven_locked, atr_pct)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
+                    amount=excluded.amount,
                     peak_price=excluded.peak_price,
-                    trailing_active=excluded.trailing_active
+                    trailing_active=excluded.trailing_active,
+                    partial_tp_taken=excluded.partial_tp_taken,
+                    breakeven_locked=excluded.breakeven_locked,
+                    atr_pct=excluded.atr_pct
             ''', (
                 pos['symbol'], pos['entry_price'], pos['peak_price'], 
-                pos['amount'], pos['quote'], pos['trailing_active'], pos['entry_time'], pos.get('source', 'unknown')
+                pos['amount'], pos['quote'], pos['trailing_active'], pos['entry_time'], pos.get('source', 'unknown'),
+                bool(pos.get('partial_tp_taken', False)),
+                bool(pos.get('breakeven_locked', False)),
+                float(pos.get('atr_pct', 0.0) or 0.0)
             ))
             conn.commit()
     except Exception as e:

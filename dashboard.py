@@ -8,17 +8,22 @@ import plotly.express as px
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-# Read dynamic live values from environment / .env
-_symbols_str = os.getenv("SYMBOLS", "BTC/USDC,ETH/USDC,SOL/USDC,BNB/USDC,XRP/USDC,DOGE/USDC,SUI/USDC,AVAX/USDC")
-SYMBOLS = [s.strip() for s in _symbols_str.split(",") if s.strip()]
-TIMEFRAME = os.getenv("TIMEFRAME", "15m")
-CAPITAL_PER_TRADE = float(os.getenv("TRADE_AMOUNT", os.getenv("CAPITAL_EUR", "6.5")))
-DRY_RUN = os.getenv("DRY_RUN", "False").lower() in ("true", "1", "t", "yes")
-DYNAMIC_SCREENER = os.getenv("DYNAMIC_SCREENER", "True").lower() in ("true", "1", "t", "yes")
-TRAILING_STOP_ACTIVATION = float(os.getenv("TRAILING_STOP_ACTIVATION", "1.5"))
-TRAILING_STOP_DISTANCE = float(os.getenv("TRAILING_STOP_DISTANCE", "1.0"))
-HARD_STOP_LOSS = float(os.getenv("HARD_STOP_LOSS", "2.5"))
-TAKE_PROFIT_TARGET = float(os.getenv("TAKE_PROFIT_TARGET", "5.0"))
+from src.config import (
+    SYMBOLS,
+    TIMEFRAME,
+    CAPITAL_PER_TRADE,
+    DRY_RUN,
+    DYNAMIC_SCREENER,
+    TRAILING_STOP_ACTIVATION,
+    TRAILING_STOP_DISTANCE,
+    HARD_STOP_LOSS,
+    TAKE_PROFIT_TARGET,
+    PARTIAL_TP_ENABLED,
+    PARTIAL_TP_GAIN_PCT,
+    PARTIAL_TP_RATIO,
+    MICRO_MOMENTUM_ENABLED,
+    MICRO_TIMEFRAME
+)
 
 import plotly.graph_objects as go
 from src.position_tracker import PositionTracker
@@ -102,6 +107,8 @@ st.sidebar.write(f"**Hard Stop-Loss:** -{HARD_STOP_LOSS}%")
 st.sidebar.write(f"**Trailing Stop Activation:** +{TRAILING_STOP_ACTIVATION}%")
 st.sidebar.write(f"**Trailing Distance:** {TRAILING_STOP_DISTANCE}% from peak")
 st.sidebar.write(f"**Take-Profit Target:** +{TAKE_PROFIT_TARGET}%")
+st.sidebar.write(f"**Partial Scale-Out (Phase 3):** {'50% @ +' + str(PARTIAL_TP_GAIN_PCT) + '%' if PARTIAL_TP_ENABLED else 'Disabled'}")
+st.sidebar.write(f"**Micro Scalper:** {'Active (' + MICRO_TIMEFRAME + ')' if MICRO_MOMENTUM_ENABLED else 'Disabled'}")
 
 # Top Metrics Row
 col1, col2, col3, col4, col5 = st.columns(5)
@@ -154,13 +161,22 @@ with col_right:
         pos_list = []
         for sym, pos in open_positions.items():
             source_strat = pos.get("source", "unknown")
-            ts_status = "🟢 1.2% from peak" if source_strat == "breakout" else ("🟢 YES" if pos.get("trailing_active") else "⚪ Pending (+1.5%)")
+            is_breakeven = pos.get("breakeven_locked", False)
+            partial_done = pos.get("partial_tp_taken", False)
+            if is_breakeven:
+                ts_status = "🟢 Breakeven Locked (+0.3%)"
+            elif pos.get("trailing_active"):
+                ts_status = "🟢 Active (Trailing Peak)"
+            else:
+                ts_status = "⚪ Arming at +1.2%" if "scalp" in source_strat else f"⚪ Pending (+{TRAILING_STOP_ACTIVATION}%)"
+
             pos_list.append({
                 "Symbol": sym,
                 "Strategy": source_strat.replace("_", " ").title(),
                 "Entry Price": f"{pos['entry_price']:.4f}",
                 "Highest Peak": f"{pos.get('peak_price', pos['entry_price']):.4f}",
                 "Position Size": f"{pos['amount']} {sym.split('/')[0]}",
+                "Scale-Out": "✅ 50% TP Locked" if partial_done else "❌ Full Runner",
                 "Trailing Stop": ts_status,
                 "Entry Time": pos.get("entry_time", "N/A")
             })

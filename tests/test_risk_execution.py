@@ -165,6 +165,125 @@ class TestRiskExecution(unittest.TestCase):
         )
         self.assertAlmostEqual(size, 6.0, places=1)
 
+    def test_partial_take_profit_scale_out_eligible(self):
+        from src.position_tracker import PositionTracker
+        from src import database
+        
+        tracker = PositionTracker()
+        # Mock open position with $12 notional (Tier 1 size)
+        # Entry @ 10.0, amount 1.2 -> $12.0 cost
+        tracker.record_entry("TEST/USDC", entry_price=10.0, amount=1.2, source="ai_pullback+revolut_ai")
+        
+        # Current price rises to 10.25 (+2.5% gain >= 2.2% partial TP threshold)
+        # 50% notional = 1.2 * 0.5 * 10.25 = $6.15 >= $5.20 MIN_PARTIAL_NOTIONAL
+        exit_check = tracker.check_position_exit("TEST/USDC", current_price=10.25)
+        self.assertIsNotNone(exit_check)
+        exit_type, reason, pnl_pct = exit_check
+        self.assertEqual(exit_type, "PARTIAL_TAKE_PROFIT")
+        self.assertIn("50% scale-out", reason)
+        self.assertAlmostEqual(pnl_pct, 2.5, places=1)
+
+        # Record partial exit of 0.6 units
+        partial_rec = tracker.record_partial_exit("TEST/USDC", exit_price=10.25, sold_amount=0.6, reason=reason)
+        self.assertEqual(partial_rec["amount"], 0.6)
+        self.assertAlmostEqual(partial_rec["realized_pnl"], 0.15, places=2)
+
+        # Check remaining position in database
+        pos = database.get_open_position("TEST/USDC")
+        self.assertIsNotNone(pos)
+        self.assertAlmostEqual(pos["amount"], 0.6, places=4)
+        self.assertTrue(pos["partial_tp_taken"])
+        self.assertTrue(pos["breakeven_locked"])
+        self.assertTrue(pos["trailing_active"])
+
+        # Clean up test position
+        database.remove_position("TEST/USDC")
+
+    def test_partial_take_profit_clamp_below_min_notional(self):
+        from src.position_tracker import PositionTracker
+        from src import database
+        
+        tracker = PositionTracker()
+        # Small position: $6.00 notional (Tier 2/3 size)
+        tracker.record_entry("SMALL/USDC", entry_price=10.0, amount=0.6, source="breakout")
+        
+        # Price rises to 10.25 (+2.5% gain)
+        # 50% notional = 0.6 * 0.5 * 10.25 = $3.075 < $5.20 MIN_PARTIAL_NOTIONAL
+        # Must NOT trigger partial scale-out to prevent Binance MIN_NOTIONAL error!
+        exit_check = tracker.check_position_exit("SMALL/USDC", current_price=10.25)
+        # Should NOT be PARTIAL_TAKE_PROFIT (might be None since +2.5% hasn't hit full TP of +5% or trailing stop)
+        if exit_check is not None:
+            self.assertNotEqual(exit_check[0], "PARTIAL_TAKE_PROFIT")
+
+        # Clean up
+        database.remove_position("SMALL/USDC")
+
+    def test_runner_breakeven_lock_after_partial(self):
+        from src.position_tracker import PositionTracker
+        from src import database
+        
+        tracker = PositionTracker()
+        tracker.record_entry("RUNNER/USDC", entry_price=10.0, amount=1.2, source="ai_pullback")
+        # Trigger partial exit
+        tracker.record_partial_exit("RUNNER/USDC", exit_price=10.25, sold_amount=0.6, reason="Partial TP")
+        
+        # Runner reaches peak of 10.35 (+3.5%), then pulls back
+        tracker.check_position_exit("RUNNER/USDC", current_price=10.35)
+        
+        # Pulls back to 10.05 (+0.5%, above entry + 0.3% floor)
+        # Since peak was 10.35 and runner floor at peak 3.5% is +1.8% (10.18):
+        # 10.05 is below the runner floor of 10.18, so it MUST exit via TRAILING_STOP in profit!
+        exit_check = tracker.check_position_exit("RUNNER/USDC", current_price=10.05)
+        self.assertIsNotNone(exit_check)
+        self.assertEqual(exit_check[0], "TRAILING_STOP")
+        self.assertGreater(exit_check[2], 0.0)  # PnL percentage is strictly positive!
+
+        # Clean up
+        database.remove_position("RUNNER/USDC")
+
+    def test_atr_adaptive_volatility_exit(self):
+        from src.position_tracker import PositionTracker
+        from src import database
+        
+        tracker = PositionTracker()
+        # Asset with high ATR of 2.5% (0.025)
+        tracker.record_entry("VOL/USDC", entry_price=100.0, amount=0.06, source="breakout", atr_pct=0.025)
+        
+        # In high volatility, trailing stop distance adapts: 1.5 * 2.5% = 3.75% -> clamped to 3.5%
+        # Target TP adapts: 2.5% * 350.0 = 8.75% (instead of default 5.0%)
+        # Price hits 105.0 (+5.0%). With default TP it would exit at +5.0%, but with high-ATR adaptive exit, it lets the runner ride!
+        exit_check = tracker.check_position_exit("VOL/USDC", current_price=105.0)
+        # At +5.0%, adaptive TP is 8.75%, so it should HOLD (None)
+        self.assertIsNone(exit_check)
+
+        # When price reaches 109.0 (+9.0% >= 8.75%), it triggers adaptive TAKE_PROFIT
+        exit_check_tp = tracker.check_position_exit("VOL/USDC", current_price=109.0)
+        self.assertIsNotNone(exit_check_tp)
+        self.assertEqual(exit_check_tp[0], "TAKE_PROFIT")
+
+        # Clean up
+        database.remove_position("VOL/USDC")
+
+    def test_execution_manager_explicit_amount_sell(self):
+        from src.execution import ExecutionManager
+        mock_ex = MagicMock()
+        mock_ex.market = MagicMock(return_value={'limits': {'cost': {'min': 5.0}, 'amount': {'min': 0.001}}})
+        mock_ex.fetch_ticker = MagicMock(return_value={'last': 10.0})
+        mock_ex.price_to_precision = MagicMock(side_effect=lambda s, p: p)
+        mock_ex.amount_to_precision = MagicMock(side_effect=lambda s, a: a)
+        
+        port = MagicMock()
+        port.fetch_balances = MagicMock(return_value={'TEST': {'free': 1.0}})
+        
+        executor = ExecutionManager(mock_ex, port)
+        executor.dry_run = True
+        
+        # Test selling explicit amount of 0.5 (50% scale out)
+        res = executor.execute_order("TEST/USDC", "sell", amount=0.5)
+        self.assertIsNotNone(res)
+        self.assertEqual(res['amount'], 0.5)
+        self.assertEqual(res['price'], 10.0)
+
 if __name__ == '__main__':
     unittest.main()
 

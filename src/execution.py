@@ -44,7 +44,7 @@ class ExecutionManager:
     def _create_market_order(self, symbol: str, side: str, amount: float):
         return self.exchange.create_market_order(symbol, side, amount)
 
-    def execute_order(self, symbol: str, side: str, amount_usd: float = 0.0):
+    def execute_order(self, symbol: str, side: str, amount_usd: float = 0.0, amount: float = 0.0):
         try:
             base, quote = symbol.split('/') if '/' in symbol else (symbol, 'USD')
             market = self.exchange.market(symbol)
@@ -65,24 +65,28 @@ class ExecutionManager:
                 except (ValueError, TypeError):
                     pass
 
-            if amount_usd <= 0.0 and self.capital > 0.0:
+            if amount_usd <= 0.0 and amount <= 0.0 and self.capital > 0.0:
                 amount_usd = self.capital
 
             if side == 'buy':
-                if amount_usd < min_cost:
-                    logger.warning(f"Capital {amount_usd} {quote} is below minimum order cost {min_cost} {quote}. Order rejected.")
-                    return None
+                if amount > 0.0:
+                    order_amt = amount
+                    final_cost = order_amt * price
+                else:
+                    if amount_usd < min_cost:
+                        logger.warning(f"Capital {amount_usd} {quote} is below minimum order cost {min_cost} {quote}. Order rejected.")
+                        return None
+                    order_amt = amount_usd / price
                     
-                amount = amount_usd / price
-                amount = float(self.exchange.amount_to_precision(symbol, amount))
+                order_amt = float(self.exchange.amount_to_precision(symbol, order_amt))
                 
                 # Check minQty LOT_SIZE filter
-                if amount < min_qty:
-                    logger.warning(f"Calculated amount {amount} is below minQty {min_qty}. Order rejected.")
+                if order_amt < min_qty:
+                    logger.warning(f"Calculated amount {order_amt} is below minQty {min_qty}. Order rejected.")
                     return None
 
                 # Re-check cost after precision adjustment for MIN_NOTIONAL filter
-                final_cost = amount * price
+                final_cost = order_amt * price
                 if final_cost < min_cost:
                     logger.warning(f"Precision-adjusted cost {final_cost} {quote} is below minimum {min_cost} {quote}. Order rejected.")
                     return None
@@ -90,9 +94,9 @@ class ExecutionManager:
                 if self.dry_run:
                     fee = final_cost * 0.001
                     if self.portfolio:
-                        self.portfolio.simulate_trade(symbol, 'buy', amount, price, fee, quote)
-                    logger.info(f"[DRY RUN] BUY {amount} {symbol} @ {price} | Value: {final_cost} {quote} | Est. Fee: {fee} {quote}")
-                    return {'status': 'dry_run', 'side': 'buy', 'price': price, 'amount': amount, 'quote': quote}
+                        self.portfolio.simulate_trade(symbol, 'buy', order_amt, price, fee, quote)
+                    logger.info(f"[DRY RUN] BUY {order_amt} {symbol} @ {price} | Value: {final_cost} {quote} | Est. Fee: {fee} {quote}")
+                    return {'status': 'dry_run', 'side': 'buy', 'price': price, 'amount': order_amt, 'quote': quote}
 
                 # Live balance check to prevent InsufficientFunds
                 if self.portfolio:
@@ -104,11 +108,11 @@ class ExecutionManager:
                     except Exception as e:
                         logger.warning(f"Could not fetch balance for pre-check: {e}")
 
-                logger.info(f"[LIVE] Submitting market BUY order for {amount} {symbol} (~{final_cost} {quote})...")
-                order = self._create_market_order(symbol, 'buy', amount)
+                logger.info(f"[LIVE] Submitting market BUY order for {order_amt} {symbol} (~{final_cost} {quote})...")
+                order = self._create_market_order(symbol, 'buy', order_amt)
                 logger.info(f"BUY order successful: {order}")
                 fill_price = price
-                fill_amount = amount
+                fill_amount = order_amt
                 if isinstance(order, dict):
                     if order.get('average') and float(order['average']) > 0:
                         fill_price = float(order['average'])
@@ -119,7 +123,6 @@ class ExecutionManager:
                 return {'status': 'live', 'side': 'buy', 'price': fill_price, 'amount': fill_amount, 'quote': quote, 'order': order}
 
             elif side == 'sell':
-                amount = 0.0
                 sell_qty = 0.0
                 if self.portfolio:
                     try:
@@ -132,66 +135,79 @@ class ExecutionManager:
                             avail_base = max(0.0, avail_base - reserve)
                             logger.info(f"[BNB Reserve Shield] Preserving {reserve:.4f} BNB for fees; available to sell: {avail_base:.4f} BNB")
 
-                        # If position tracker has an open position with tracked amount, cap sell amount to position size
-                        pos = database.get_open_position(symbol)
-                        if pos and pos.get('amount') and float(pos['amount']) > 0:
-                            target_amount = float(pos['amount'])
-                            sell_qty = min(avail_base, target_amount)
-                        elif amount_usd > 0:
+                        # If explicit amount is requested (e.g. partial scale-out), use it capped by available
+                        if amount > 0.0:
+                            sell_qty = min(avail_base, amount)
+                        elif amount_usd > 0.0:
                             sell_qty = min(avail_base, amount_usd / price)
                         else:
-                            sell_qty = avail_base
+                            # If position tracker has an open position with tracked amount, cap sell amount to position size
+                            pos = database.get_open_position(symbol)
+                            if pos and pos.get('amount') and float(pos['amount']) > 0:
+                                target_amount = float(pos['amount'])
+                                sell_qty = min(avail_base, target_amount)
+                            else:
+                                sell_qty = avail_base
 
                         if sell_qty <= 0.0:
                             logger.info(f"No active position to SELL for {symbol} (holding 0 {base} above reserve). Returning dust/cleared status.")
                             return {'status': 'cleared_dust', 'side': 'sell', 'price': price, 'amount': 0.0, 'quote': quote}
                             
-                        amount = float(self.exchange.amount_to_precision(symbol, sell_qty))
+                        order_amt = float(self.exchange.amount_to_precision(symbol, sell_qty))
                         
-                        if amount < min_qty:
-                            logger.info(f"No active position to SELL for {symbol} (holding {amount} {base} < minQty {min_qty}). Returning dust/cleared status.")
+                        if order_amt < min_qty:
+                            logger.info(f"No active position to SELL for {symbol} (holding {order_amt} {base} < minQty {min_qty}). Returning dust/cleared status.")
                             return {'status': 'cleared_dust', 'side': 'sell', 'price': price, 'amount': 0.0, 'quote': quote}
                             
-                        final_cost = amount * price
+                        final_cost = order_amt * price
                         if final_cost < min_cost:
-                            logger.info(f"No active position to SELL for {symbol} (holding {amount} {base} worth < minNotional {min_cost} {quote}). Returning dust/cleared status.")
+                            logger.info(f"No active position to SELL for {symbol} (holding {order_amt} {base} worth < minNotional {min_cost} {quote}). Returning dust/cleared status.")
                             return {'status': 'cleared_dust', 'side': 'sell', 'price': price, 'amount': 0.0, 'quote': quote}
                     except Exception as e:
                         logger.warning(f"Could not fetch balance for sell pre-check: {e}")
                         return None
                 else:
-                    sell_usd = amount_usd if amount_usd > 0 else (self.capital if self.capital > 0 else 5.0)
-                    sell_qty = sell_usd / price
-                    amount = float(self.exchange.amount_to_precision(symbol, sell_qty))
-                    final_cost = amount * price
+                    if amount > 0.0:
+                        sell_qty = amount
+                    elif amount_usd > 0.0:
+                        sell_qty = amount_usd / price
+                    else:
+                        pos = database.get_open_position(symbol)
+                        if pos and pos.get('amount') and float(pos['amount']) > 0:
+                            sell_qty = float(pos['amount'])
+                        else:
+                            sell_usd = self.capital if self.capital > 0 else 5.0
+                            sell_qty = sell_usd / price
+                    order_amt = float(self.exchange.amount_to_precision(symbol, sell_qty))
+                    final_cost = order_amt * price
 
                 if self.dry_run:
                     if final_cost < min_cost:
-                        logger.info(f"[DRY RUN] SELL skipped: dust amount {amount} {base} worth {final_cost:.4f} {quote} < min {min_cost} {quote}.")
+                        logger.info(f"[DRY RUN] SELL skipped: dust amount {order_amt} {base} worth {final_cost:.4f} {quote} < min {min_cost} {quote}.")
                         return None
                     fee = final_cost * 0.001
                     if self.portfolio:
-                        self.portfolio.simulate_trade(symbol, 'sell', amount, price, fee, quote)
-                    logger.info(f"[DRY RUN] SELL {amount} {symbol} @ {price} | Value: {final_cost} {quote} | Est. Fee: {fee} {quote}")
-                    return {'status': 'dry_run', 'side': 'sell', 'price': price, 'amount': amount, 'quote': quote}
+                        self.portfolio.simulate_trade(symbol, 'sell', order_amt, price, fee, quote)
+                    logger.info(f"[DRY RUN] SELL {order_amt} {symbol} @ {price} | Value: {final_cost} {quote} | Est. Fee: {fee} {quote}")
+                    return {'status': 'dry_run', 'side': 'sell', 'price': price, 'amount': order_amt, 'quote': quote}
 
-                logger.info(f"[LIVE] Submitting market SELL order for {amount} {symbol}...")
+                logger.info(f"[LIVE] Submitting market SELL order for {order_amt} {symbol}...")
                 try:
-                    order = self._create_market_order(symbol, 'sell', amount)
+                    order = self._create_market_order(symbol, 'sell', order_amt)
                 except ccxt.InsufficientFunds as e:
-                    logger.warning(f"Insufficient funds for {amount} {symbol}. Attempting to sell 99%...")
+                    logger.warning(f"Insufficient funds for {order_amt} {symbol}. Attempting to sell 99%...")
                     try:
-                        amount = float(self.exchange.amount_to_precision(symbol, sell_qty * 0.99))
-                        if amount < min_qty:
-                            logger.info(f"99% of balance {amount} is less than minQty. Returning dust/cleared status.")
+                        order_amt = float(self.exchange.amount_to_precision(symbol, sell_qty * 0.99))
+                        if order_amt < min_qty:
+                            logger.info(f"99% of balance {order_amt} is less than minQty. Returning dust/cleared status.")
                             return {'status': 'cleared_dust', 'side': 'sell', 'price': price, 'amount': 0.0, 'quote': quote}
-                        order = self._create_market_order(symbol, 'sell', amount)
+                        order = self._create_market_order(symbol, 'sell', order_amt)
                     except Exception as e2:
                         logger.error(f"Second sell attempt failed: {e2}")
                         return {'status': 'cleared_error', 'side': 'sell', 'price': price, 'amount': 0.0, 'quote': quote}
                 logger.info(f"SELL order successful: {order}")
                 fill_price = price
-                fill_amount = amount
+                fill_amount = order_amt
                 if isinstance(order, dict):
                     if order.get('average') and float(order['average']) > 0:
                         fill_price = float(order['average'])
