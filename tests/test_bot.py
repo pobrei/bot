@@ -279,8 +279,8 @@ def test_trailing_stop_not_triggered_below_activation(tmp_path):
     # 3. Price surges to $102.50 (+2.50%) -> arms trailing stop
     assert tracker.check_position_exit("ADA/USDC", 102.50) is None
     
-    # 4. Price falls back to $101.20 (> 1.0% below 102.50 peak) -> Trailing stop hits with profit!
-    exit_check = tracker.check_position_exit("ADA/USDC", 101.20)
+    # 4. Price falls back to $100.90 (> 1.5% below 102.50 peak) -> Trailing stop hits with profit!
+    exit_check = tracker.check_position_exit("ADA/USDC", 100.90)
     assert exit_check is not None
     exit_type, reason, pnl_pct = exit_check
     assert exit_type == "TRAILING_STOP"
@@ -309,6 +309,67 @@ def test_instance_locking(tmp_path):
     # Cleanup first lock
     lock1.close()
     main._SOCKET_LOCK = None
+
+def test_btc_macro_gate():
+    import pandas as pd
+    from src.strategy import Strategy
+
+    # 1. Insufficient data allows trading
+    small_df = pd.DataFrame({'close': [80000.0] * 10})
+    is_safe, reason = Strategy.check_btc_macro_gate(small_df)
+    assert is_safe is True
+
+    # 2. Healthy uptrend
+    closes = [80000.0 + i * 50 for i in range(60)]
+    healthy_df = pd.DataFrame({'close': closes})
+    is_safe, reason = Strategy.check_btc_macro_gate(healthy_df)
+    assert is_safe is True
+    assert "OK" in reason
+
+    # 3. Sudden 2-bar dump (> 0.8%)
+    dump_closes = [80000.0 + i * 20 for i in range(58)] + [81160.0 * 0.988, 81160.0 * 0.985]
+    dump_df = pd.DataFrame({'close': dump_closes})
+    is_safe, reason = Strategy.check_btc_macro_gate(dump_df)
+    assert is_safe is False
+    assert "sharp dump" in reason
+
+    # 4. Sustained downtrend below EMA50
+    down_closes = [85000.0 - i * 100 for i in range(60)]
+    down_df = pd.DataFrame({'close': down_closes})
+    is_safe, reason = Strategy.check_btc_macro_gate(down_df)
+    assert is_safe is False
+    assert "below 50 EMA" in reason
+
+def test_ai_pullback_entry():
+    import pandas as pd
+    import numpy as np
+    from src.strategy import Strategy
+
+    strat = Strategy()
+    np.random.seed(42)
+    prices = [100.0]
+    for _ in range(70):
+        prices.append(prices[-1] + np.random.normal(0.08, 0.4))
+    for _ in range(5):
+        prices.append(prices[-1] - 0.35)
+    prices.append(prices[-1] + 0.15)
+
+    records = []
+    for p in prices:
+        records.append({'open': p - 0.1, 'high': p + 0.3, 'low': p - 0.3, 'close': p, 'volume': 1000.0})
+
+    df = pd.DataFrame(records)
+
+    # Without high AI score, it stays HOLD
+    res_no_ai = strat.evaluate("TEST/USDC", df.copy(), rev_score=0.10)
+    assert res_no_ai['signal'] == 'HOLD'
+
+    # With high AI score (rev_score >= 0.35), AI Pullback triggers BUY
+    res_ai = strat.evaluate("TEST/USDC", df.copy(), rev_score=0.55)
+    assert res_ai['signal'] == 'BUY'
+    assert res_ai['source'] == 'ai_pullback'
+    assert res_ai['priority_score'] > 50.0
+
 
 
 

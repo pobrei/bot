@@ -13,7 +13,8 @@ from src.config import (
     USE_REVOLUT_SIGNALS,
     REVOLUT_MIN_SCORE,
     MIN_AI_CONFLUENCE_SCORE,
-    MIN_ATR_RATIO
+    MIN_ATR_RATIO,
+    BTC_GATE_ENABLED
 )
 from src.market_data import MarketData
 from src.strategy import Strategy
@@ -206,6 +207,23 @@ def main(attempt: int = 0):
                             active_symbols.append(c_sym)
                             logger.info(f"[Revolut Bridge] AI Candidate Ingested: {c_sym} (Score: {cand['composite_score']:+.2f})")
 
+                # Evaluate Bitcoin Macro Market Gate
+                btc_safe = True
+                btc_gate_reason = ""
+                if BTC_GATE_ENABLED:
+                    try:
+                        btc_sym = f"BTC/{quote_sample}"
+                        btc_df = market_data.fetch_ohlcv(btc_sym, TIMEFRAME, limit=60)
+                        if btc_df.empty:
+                            btc_df = market_data.fetch_ohlcv("BTC/USDT", TIMEFRAME, limit=60)
+                        btc_safe, btc_gate_reason = strategy.check_btc_macro_gate(btc_df)
+                        if not btc_safe:
+                            logger.warning(f"[Macro Market Gate] Altcoin BUYs suppressed: {btc_gate_reason}")
+                        else:
+                            logger.info(f"[Macro Market Gate] BTC status healthy: {btc_gate_reason}")
+                    except Exception as e:
+                        logger.warning(f"[Macro Market Gate] Failed to evaluate BTC macro gate: {e}")
+
                 buy_signals = []
 
                 for symbol in active_symbols:
@@ -220,8 +238,17 @@ def main(attempt: int = 0):
 
                     current_price = float(df['close'].iloc[-1])
                     
-                    # Strategy Evaluation
-                    eval_result = strategy.evaluate(symbol, df)
+                    # Revolut Intelligence
+                    rev_score = 0.0
+                    rev_summary = 'No AI coverage'
+                    if USE_REVOLUT_SIGNALS:
+                        rev_intel = revolut_bridge.get_sentiment(symbol)
+                        if rev_intel:
+                            rev_score = rev_intel.get('composite_score', 0.0)
+                            rev_summary = rev_intel.get('summary', '')
+
+                    # Strategy Evaluation (passes AI score to enable high-conviction AI Pullbacks)
+                    eval_result = strategy.evaluate(symbol, df, rev_score=rev_score)
                     signal = eval_result.get('signal', 'HOLD')
                     source = eval_result.get('source', 'unknown')
                     priority_score = eval_result.get('priority_score', 0.0)
@@ -229,10 +256,6 @@ def main(attempt: int = 0):
 
                     # Hybrid AI Fusion (Revolut Intelligence)
                     if USE_REVOLUT_SIGNALS:
-                        rev_intel = revolut_bridge.get_sentiment(symbol)
-                        rev_score = rev_intel.get('composite_score', 0.0) if rev_intel else 0.0
-                        rev_summary = rev_intel.get('summary', '') if rev_intel else 'No AI coverage'
-
                         # Case A: Bearish Veto - Suppress BUYs when news/sentiment is heavily negative
                         if signal == 'BUY' and rev_score < -0.30:
                             logger.warning(
@@ -250,7 +273,8 @@ def main(attempt: int = 0):
                         # Case C: High Conviction Convergent Boost - Strong agreement (score >= 0.35)
                         elif signal == 'BUY' and rev_score >= 0.35:
                             priority_score += rev_score * 20.0
-                            source = f"{source}+revolut_ai"
+                            if "revolut_ai" not in str(source):
+                                source = f"{source}+revolut_ai"
                             logger.info(
                                 f"[{symbol}] ⭐ High-Conviction AI Convergent BUY ({rev_score:+.2f}) -> Boosted Priority: {priority_score:.2f}"
                             )
@@ -258,10 +282,18 @@ def main(attempt: int = 0):
                         # Case D: Moderate AI Confirmation (0.20 <= score < 0.35)
                         elif signal == 'BUY':
                             priority_score += rev_score * 10.0
-                            source = f"{source}+revolut_ai"
+                            if "revolut_ai" not in str(source):
+                                source = f"{source}+revolut_ai"
                             logger.info(
                                 f"[{symbol}] AI Confirmed BUY ({rev_score:+.2f}) -> Priority: {priority_score:.2f}"
                             )
+
+                    # BTC Macro Gate Protection: Suppress altcoin buys if BTC market is dumping
+                    if signal == 'BUY' and not btc_safe and "BTC/" not in symbol:
+                        logger.warning(
+                            f"[{symbol}] Suppressing BUY: BTC Macro Gate is active ({btc_gate_reason})"
+                        )
+                        signal = 'HOLD'
                     
                     logger.info(f"[{symbol}] Signal: {signal} | Regime: {regime} | Score: {priority_score:.2f}")
                     

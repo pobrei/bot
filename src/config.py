@@ -14,10 +14,13 @@ CAPITAL_PER_TRADE = float(os.getenv("TRADE_AMOUNT", os.getenv("CAPITAL_EUR", "5.
 CAPITAL_EUR = CAPITAL_PER_TRADE  # Alias for backward compatibility
 
 # Dynamic Trailing Stop & Profit Targets (%)
-TRAILING_STOP_ACTIVATION = float(os.getenv("TRAILING_STOP_ACTIVATION", "1.5")) # Activate when profit >= 1.5%
-TRAILING_STOP_DISTANCE = float(os.getenv("TRAILING_STOP_DISTANCE", "1.0"))     # Trail 1.0% below peak
-HARD_STOP_LOSS = float(os.getenv("HARD_STOP_LOSS", "2.5"))                     # Hard stop at -2.5%
+TRAILING_STOP_ACTIVATION = float(os.getenv("TRAILING_STOP_ACTIVATION", "2.0")) # Activate when profit >= 2.0%
+TRAILING_STOP_DISTANCE = float(os.getenv("TRAILING_STOP_DISTANCE", "1.5"))     # Trail 1.5% below peak for breathing room
+HARD_STOP_LOSS = float(os.getenv("HARD_STOP_LOSS", "1.6"))                     # Tightened hard stop at -1.6% to cut losses fast
 TAKE_PROFIT_TARGET = float(os.getenv("TAKE_PROFIT_TARGET", "5.0"))             # Fixed TP target at +5.0%
+
+# Macro Market Gate (suppress altcoin buys during Bitcoin dumps)
+BTC_GATE_ENABLED = os.getenv("BTC_GATE_ENABLED", "True").lower() in ("true", "1", "t", "yes")
 
 # Dynamic Screener (defaults to False to trade strictly curated high-conviction assets)
 DYNAMIC_SCREENER = os.getenv("DYNAMIC_SCREENER", "False").lower() in ("true", "1", "t", "yes")

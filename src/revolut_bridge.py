@@ -97,7 +97,7 @@ class RevolutSignalBridge:
                 cur.execute("""
                     SELECT symbol, price, action, composite_score, tech_score, sentiment_score, summary, updated_at 
                     FROM market_snapshots
-                    ORDER BY composite_score DESC
+                    ORDER BY updated_at DESC
                 """)
                 rows = cur.fetchall()
                 conn.close()
@@ -111,6 +111,7 @@ class RevolutSignalBridge:
         """
         Returns structured intelligence for all active Binance crypto pairs.
         Cached for `cache_ttl` seconds to avoid overhead.
+        Ensures the newest snapshot for each asset is retained.
         """
         now = time.time()
         if not force_refresh and self._cached_intel and (now - self._last_fetch_time < self.cache_ttl):
@@ -141,6 +142,11 @@ class RevolutSignalBridge:
             # Crypto tickers on Revolut contain '-USD' or '/'
             if ("-USD" not in ticker) and ("/" not in ticker):
                 continue
+
+            # If symbol already present, keep the newer snapshot
+            if binance_symbol in intel_map:
+                if updated_at <= intel_map[binance_symbol].get("updated_at", 0.0):
+                    continue
 
             intel_map[binance_symbol] = {
                 "raw_ticker": ticker,
@@ -191,11 +197,13 @@ class RevolutSignalBridge:
         self, 
         min_score: float = REVOLUT_MIN_SCORE, 
         preferred_quote: str = "USDC",
-        max_candidates: int = 5
+        max_candidates: int = 5,
+        max_age_seconds: float = 43200.0
     ) -> List[Dict[str, Any]]:
         """
         Returns top BUY candidate crypto pairs scored above `min_score`.
         Incorporates both high-scoring live snapshots and active swing BUY trades.
+        Higher-timeframe AI sentiment is retained for up to 12 hours (43200s).
         """
         if not USE_REVOLUT_SIGNALS:
             return []
@@ -205,7 +213,7 @@ class RevolutSignalBridge:
         seen_symbols = set()
 
         now = time.time()
-        max_age = 3600.0  # Max 1 hour old
+        max_age = max_age_seconds
 
         # 1. Ingest any confirmed BUY swing trades from Revolut active_trades
         active_trades = self.fetch_active_trades()

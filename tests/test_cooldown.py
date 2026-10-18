@@ -67,15 +67,15 @@ def test_tiered_trailing_stop_breakeven_floor():
     
     tracker.record_entry(symbol, entry_price=100.0, amount=1.0, quote="USDC", source="breakout")
     
-    # Price rises to 101.6 (+1.6%), arming the trailing stop
-    exit_signal = tracker.check_position_exit(symbol, current_price=101.6)
+    # Price rises to 102.1 (+2.1%), arming the trailing stop
+    exit_signal = tracker.check_position_exit(symbol, current_price=102.1)
     assert exit_signal is None  # Still holding at peak
     
     pos = database.get_open_position(symbol)
     assert pos["trailing_active"] is True
-    assert pos["peak_price"] == 101.6
+    assert pos["peak_price"] == 102.1
     
-    # Price pulls back to 100.3. Since breakeven floor is 100.4 (+0.4%), it MUST trigger exit!
+    # Price pulls back to 100.3. Since trigger is ~100.57 (and floor 100.2), it MUST trigger exit!
     exit_signal = tracker.check_position_exit(symbol, current_price=100.3)
     assert exit_signal is not None
     exit_type, reason, pnl_pct = exit_signal
@@ -92,20 +92,20 @@ def test_tiered_trailing_stop_runner_mode():
     
     tracker.record_entry(symbol, entry_price=100.0, amount=1.0, quote="USDC", source="breakout")
     
-    # Price surges to 104.0 (+4.0%), activating runner mode (1.2% breathing trail with +1.2% floor)
+    # Price surges to 104.0 (+4.0%), activating runner mode (1.5% breathing trail with +1.5% floor)
     tracker.check_position_exit(symbol, current_price=104.0)
     
-    # 1.2% below peak 104.0 is: 104.0 * (1 - 0.012) = 102.752
-    # Normal 15m noise down to 103.35 (-0.6%) should NOT choke the runner!
-    exit_signal = tracker.check_position_exit(symbol, current_price=103.35)
+    # 1.5% below peak 104.0 is: 104.0 * (1 - 0.015) = 102.44
+    # Normal 15m noise down to 103.00 (-1.0%) should NOT choke the runner!
+    exit_signal = tracker.check_position_exit(symbol, current_price=103.00)
     assert exit_signal is None  # Runner continues breathing!
 
-    # Pullback below 102.752 (e.g. 102.70) triggers trailing stop, locking in +2.7%
-    exit_signal = tracker.check_position_exit(symbol, current_price=102.70)
+    # Pullback below 102.44 (e.g. 102.30) triggers trailing stop, locking in +2.3%
+    exit_signal = tracker.check_position_exit(symbol, current_price=102.30)
     assert exit_signal is not None
     exit_type, reason, pnl_pct = exit_signal
     assert exit_type == "TRAILING_STOP"
-    assert pnl_pct >= 2.6
+    assert pnl_pct >= 2.2
     
     database.remove_position(symbol)
     database.clear_symbol_cooldown(symbol)

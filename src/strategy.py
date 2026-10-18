@@ -1,3 +1,4 @@
+from typing import Tuple, Dict, Any, Optional
 import pandas as pd
 import pandas_ta_classic as ta
 import logging
@@ -13,7 +14,36 @@ class Strategy:
     def get_regime(self, symbol: str) -> str:
         return self.last_regimes.get(symbol, "UNKNOWN")
 
-    def evaluate(self, symbol: str, df: pd.DataFrame, min_atr_ratio: float = None) -> dict:
+    @staticmethod
+    def check_btc_macro_gate(btc_df: pd.DataFrame) -> Tuple[bool, str]:
+        """
+        Evaluates Bitcoin macro market condition to protect altcoin positions during market-wide dumps.
+        Returns: (is_safe: bool, reason: str)
+        """
+        if btc_df is None or btc_df.empty or len(btc_df) < 50:
+            return True, "Insufficient BTC bars, allowing trades"
+
+        close_series = btc_df['close']
+        ema_50 = ta.ema(close_series, length=50)
+        curr = btc_df.iloc[-1]
+        prev = btc_df.iloc[-2]
+        prev2 = btc_df.iloc[-3] if len(btc_df) >= 3 else prev
+
+        curr_close = float(curr['close'])
+        curr_ema50 = float(ema_50.iloc[-1]) if ema_50 is not None and not pd.isna(ema_50.iloc[-1]) else curr_close
+
+        # 1. Fast Dump Gate: 2-bar drop > 0.8%
+        two_bar_ret = ((curr_close - float(prev2['close'])) / float(prev2['close'])) * 100.0
+        if two_bar_ret < -0.80:
+            return False, f"BTC sharp dump: {two_bar_ret:.2f}% over last 2 bars"
+
+        # 2. Structural Downtrend Gate: Price trading below declining EMA50 with consecutive red bars
+        if curr_close < curr_ema50 * 0.995 and curr_close < float(prev['close']):
+            return False, f"BTC below 50 EMA ({curr_close:.1f} < {curr_ema50:.1f}) in active downward leg"
+
+        return True, "BTC Macro Gate OK"
+
+    def evaluate(self, symbol: str, df: pd.DataFrame, min_atr_ratio: float = None, rev_score: float = 0.0) -> dict:
         result = {'signal': 'HOLD', 'source': None, 'priority_score': 0.0}
         if df.empty or len(df) < 27:
             return result
@@ -21,6 +51,10 @@ class Strategy:
         # Core Indicators
         df['EMA_12'] = ta.ema(df['close'], length=12)
         df['EMA_26'] = ta.ema(df['close'], length=26)
+        if len(df) >= 50:
+            df['EMA_50'] = ta.ema(df['close'], length=50)
+        else:
+            df['EMA_50'] = df['EMA_26']
         df['RSI_14'] = ta.rsi(df['close'], length=14)
         df['Volume_SMA'] = ta.sma(df['volume'], length=20)
         df['ATR_14'] = ta.atr(df['high'], df['low'], df['close'], length=14)
@@ -104,6 +138,29 @@ class Strategy:
                     result['signal'] = 'BUY'
                     result['source'] = 'breakout'
                     result['priority_score'] = (adx_val or 25.0) * 1.5
+
+        # 3. AI-Confirmed Pullback setup (Buy high-conviction dips in established uptrends)
+        if result['signal'] == 'HOLD' and rev_score >= 0.35 and 'EMA_50' in df.columns:
+            ema50_val = curr.get('EMA_50')
+            if not pd.isna(ema50_val) and ema50_val > 0:
+                ema26_val = curr.get('EMA_26', ema50_val)
+                rsi_val = curr.get('RSI_14', 50)
+                
+                # Uptrend structure: price holds above or within 1.0% of 50 EMA
+                in_uptrend_structure = close >= (ema50_val * 0.99)
+                
+                # Pullback criteria: price has dipped near EMA26 / lower BB / RSI 34-48
+                is_dip = (close <= ema26_val * 1.008) or (bbl and close <= curr[bbl] * 1.015) or (34.0 <= rsi_val <= 48.0)
+                
+                # Stabilization confirmation: green candle or hammer lower wick
+                candle_range = curr['high'] - curr['low']
+                lower_wick = min(curr.get('open', close), close) - curr['low']
+                has_support_bounce = (close >= curr.get('open', close)) or (candle_range > 0 and (lower_wick / candle_range) >= 0.35)
+                
+                if in_uptrend_structure and is_dip and has_support_bounce and 32.0 <= rsi_val <= 55.0:
+                    result['signal'] = 'BUY'
+                    result['source'] = 'ai_pullback'
+                    result['priority_score'] = 50.0 + (rev_score * 25.0) + (55.0 - rsi_val)
                 
         # Dynamic Price Spectrums
         atr = curr.get('ATR_14', 0)

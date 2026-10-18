@@ -74,7 +74,7 @@ class PositionTracker:
         peak_gain_pct = ((peak_price - entry_price) / entry_price) * 100.0
 
         # 3. Check Trailing Stop arming / activation
-        activation_threshold = TRAILING_STOP_ACTIVATION if TRAILING_STOP_ACTIVATION else 1.5
+        activation_threshold = TRAILING_STOP_ACTIVATION if TRAILING_STOP_ACTIVATION else 2.0
         if peak_gain_pct >= activation_threshold and not trailing_active:
             trailing_active = True
             pos["trailing_active"] = True
@@ -86,19 +86,18 @@ class PositionTracker:
 
         # 4. Handle Stop-Loss, Trailing Stop, and Take-Profit logic per strategy
         # Tiered Trailing Stop & Dynamic Breathing:
-        # Tier 1 (Gain >= 1.5%): Trail at 1.2% below peak, with breakeven floor (+0.5% covering all fees + small profit)
-        # Tier 2 (Gain >= 2.5%): Runner mode! Trail at 1.2% below peak (allowing 15m candle noise to breathe),
-        #                        while strictly guaranteeing a +1.2% runner profit floor.
-        if peak_gain_pct >= 2.5:
-            trail_distance = 0.012  # 1.2% trail allows runners to breathe without getting choked by 15m noise
-            runner_floor = entry_price * 1.012  # Guaranteed profit floor of +1.2%
-            trailing_trigger_price = max(peak_price * (1.0 - trail_distance), runner_floor)
+        # Tier 1 (Gain >= 2.0%): Trail at 1.5% below peak (TRAILING_STOP_DISTANCE), with breakeven floor (+0.2% covering fees)
+        # Tier 2 (Gain >= 3.0%): Runner mode! Trail at 1.5% below peak (allowing 15m candle noise to breathe),
+        #                        while strictly guaranteeing a +1.5% runner profit floor.
+        trail_dist_ratio = (TRAILING_STOP_DISTANCE / 100.0) if TRAILING_STOP_DISTANCE else 0.015
+        if peak_gain_pct >= 3.0:
+            runner_floor = entry_price * 1.015  # Guaranteed profit floor of +1.5%
+            trailing_trigger_price = max(peak_price * (1.0 - trail_dist_ratio), runner_floor)
         else:
-            trail_distance = (TRAILING_STOP_DISTANCE / 100.0) if TRAILING_STOP_DISTANCE else 0.012
-            breakeven_floor = entry_price * 1.005  # +0.5% ensures fees and small profit are locked in
-            trailing_trigger_price = max(peak_price * (1.0 - trail_distance), breakeven_floor)
+            breakeven_floor = entry_price * 1.002  # +0.2% ensures fees and small profit are locked in
+            trailing_trigger_price = max(peak_price * (1.0 - trail_dist_ratio), breakeven_floor)
 
-        is_trend_or_swing = any(k in source.lower() for k in ["breakout", "revolut", "swing"])
+        is_trend_or_swing = any(k in source.lower() for k in ["breakout", "revolut", "swing", "pullback", "ai", "trend"])
 
         if is_trend_or_swing:
             # Trailing stop fires only if armed and price fell by trail_distance from peak

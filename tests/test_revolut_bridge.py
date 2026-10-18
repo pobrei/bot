@@ -45,7 +45,7 @@ def test_get_candidates_and_intel():
         ["SOL-USD", 120.0, "SELL", -0.55, -0.7, -0.2, "Bearish news dump", now],
         ["AAPL", 220.0, "BUY", 0.85, 0.8, 0.9, "Stock to skip", now],
         ["SAND-USD", 0.08, "BUY", 0.20, 0.3, 0.1, "Weak buy below threshold", now],
-        ["STALE-USD", 1.00, "BUY", 0.90, 1.0, 0.0, "Stale setup older than 1h", now - 5000.0]
+        ["STALE-USD", 1.00, "BUY", 0.90, 1.0, 0.0, "Stale setup older than 12h", now - 50000.0]
     ]
 
     with patch.object(bridge, "fetch_snapshots", return_value=fake_snapshots):
