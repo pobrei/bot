@@ -370,6 +370,61 @@ def test_ai_pullback_entry():
     assert res_ai['source'] == 'ai_pullback'
     assert res_ai['priority_score'] > 50.0
 
+def test_micro_momentum_scalper():
+    import pandas as pd
+    from src.strategy import Strategy
+
+    # 35 bars on 3m timeframe with alternating up/down candles
+    prices = [50.0]
+    for i in range(35):
+        prices.append(prices[-1] + (0.05 if i % 2 == 0 else -0.03))
+    prices.append(prices[-1] + 0.15)  # Breakout candle
+
+    records = []
+    for i, p in enumerate(prices):
+        vol = 1000.0 if i < len(prices) - 1 else 3000.0
+        records.append({'open': p - 0.10, 'high': p + 0.05, 'low': p - 0.12, 'close': p, 'volume': vol})
+
+    micro_df = pd.DataFrame(records)
+
+    # 1. Low AI score suppresses micro scalp
+    res_low_ai = Strategy.check_micro_momentum("SOL/USDC", micro_df, rev_score=0.10)
+    assert res_low_ai['signal'] == 'HOLD'
+
+    # 2. High AI score + volume surge triggers micro momentum BUY
+    res_high_ai = Strategy.check_micro_momentum("SOL/USDC", micro_df, rev_score=0.45)
+    assert res_high_ai['signal'] == 'BUY'
+    assert res_high_ai['source'] == 'micro_momentum'
+    assert res_high_ai['priority_score'] > 50.0
+
+def test_micro_scalp_exits():
+    from src.position_tracker import PositionTracker
+    tracker = PositionTracker()
+    sym = "SCALP/USDC"
+
+    tracker.record_entry(sym, entry_price=10.0, amount=1.0, quote="USDC", source="micro_momentum")
+
+    # 1. Price rises to 10.13 (+1.3%) -> arms micro trailing stop (activation threshold +1.2%)
+    res_arm = tracker.check_position_exit(sym, 10.13)
+    assert res_arm is None
+
+    # 2. Price falls to 10.05 (-0.8% below 10.13 peak, trigger is ~10.07) -> Trailing stop fires!
+    exit_check = tracker.check_position_exit(sym, 10.05)
+    assert exit_check is not None
+    exit_type, reason, pnl_pct = exit_check
+    assert exit_type == "TRAILING_STOP"
+    assert "Micro Scalp Trailing Stop hit" in reason
+    assert pnl_pct > 0.0
+
+    # 3. Test micro hard stop (-1.0%)
+    sym_loss = "SCALPLOSS/USDC"
+    tracker.record_entry(sym_loss, entry_price=10.0, amount=1.0, quote="USDC", source="micro_momentum")
+    exit_loss = tracker.check_position_exit(sym_loss, 9.88)
+    assert exit_loss is not None
+    assert exit_loss[0] == "HARD_STOP_LOSS"
+    assert "Micro Scalp Hard Stop-Loss" in exit_loss[1]
+
+
 
 
 

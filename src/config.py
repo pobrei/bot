@@ -29,6 +29,12 @@ TAKE_PROFIT_TARGET = float(os.getenv("TAKE_PROFIT_TARGET", "5.0"))             #
 # Macro Market Gate (suppress altcoin buys during Bitcoin dumps)
 BTC_GATE_ENABLED = os.getenv("BTC_GATE_ENABLED", "True").lower() in ("true", "1", "t", "yes")
 
+# Micro-Momentum Scalper (Dual-Timeframe 3m/5m Phase 2)
+MICRO_MOMENTUM_ENABLED = os.getenv("MICRO_MOMENTUM_ENABLED", "True").lower() in ("true", "1", "t", "yes")
+MICRO_TIMEFRAME = os.getenv("MICRO_TIMEFRAME", "3m")
+MICRO_SCAN_INTERVAL = int(os.getenv("MICRO_SCAN_INTERVAL", "60"))  # Scan every 60s when slots are open
+MICRO_VOLUME_SURGE_RATIO = float(os.getenv("MICRO_VOLUME_SURGE_RATIO", "2.2"))
+
 # Dynamic Screener (defaults to False to trade strictly curated high-conviction assets)
 DYNAMIC_SCREENER = os.getenv("DYNAMIC_SCREENER", "False").lower() in ("true", "1", "t", "yes")
 

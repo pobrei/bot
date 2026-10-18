@@ -43,6 +43,76 @@ class Strategy:
 
         return True, "BTC Macro Gate OK"
 
+    @staticmethod
+    def check_micro_momentum(
+        symbol: str, 
+        micro_df: pd.DataFrame, 
+        rev_score: float = 0.0,
+        min_vol_ratio: float = 2.2
+    ) -> dict:
+        """
+        Dual-Timeframe Micro-Momentum Scalper (3m/5m).
+        Detects early volume surges, moving-average stacks, and bullish pressure during favorable AI context.
+        Returns: {'signal': 'BUY' | 'HOLD', 'source': 'micro_momentum', 'priority_score': float}
+        """
+        result = {'signal': 'HOLD', 'source': None, 'priority_score': 0.0}
+        if micro_df is None or micro_df.empty or len(micro_df) < 25:
+            return result
+
+        # 1. AI Gate: Only scalp assets with neutral-to-positive AI conviction
+        if rev_score < 0.20:
+            return result
+
+        # 2. Indicators on micro timeframe (3m / 5m)
+        close = micro_df['close']
+        volume = micro_df['volume']
+        ema_9 = ta.ema(close, length=9)
+        ema_21 = ta.ema(close, length=21)
+        vol_sma = ta.sma(volume, length=20)
+        rsi = ta.rsi(close, length=14)
+
+        if ema_9 is None or ema_21 is None or vol_sma is None or rsi is None:
+            return result
+
+        curr = micro_df.iloc[-1]
+        prev = micro_df.iloc[-2]
+
+        curr_close = float(curr['close'])
+        curr_open = float(curr.get('open', curr_close))
+        curr_high = float(curr.get('high', curr_close))
+        curr_low = float(curr.get('low', curr_close))
+
+        curr_ema9 = float(ema_9.iloc[-1])
+        curr_ema21 = float(ema_21.iloc[-1])
+        curr_vol_sma = float(vol_sma.iloc[-1]) if vol_sma.iloc[-1] > 0 else 1.0
+        curr_rsi = float(rsi.iloc[-1])
+
+        curr_vol_ratio = float(curr['volume']) / curr_vol_sma
+        prev_vol_ratio = float(prev['volume']) / float(vol_sma.iloc[-2]) if vol_sma.iloc[-2] > 0 else 1.0
+        max_vol_ratio = max(curr_vol_ratio, prev_vol_ratio)
+
+        # 3. Setup Rules:
+        # A. Volume Surge: >= min_vol_ratio (e.g. 2.2x volume SMA)
+        has_volume_surge = max_vol_ratio >= min_vol_ratio
+
+        # B. Trend Alignment: EMA 9 > EMA 21 and price closing above EMA 9
+        is_trend_aligned = (curr_ema9 > curr_ema21) and (curr_close >= curr_ema9 * 0.999)
+
+        # C. Momentum Expansion: RSI between 50 and 78 (strong momentum, not exhausted)
+        is_rsi_healthy = 50.0 <= curr_rsi <= 78.0
+
+        # D. Bullish Candle Pressure: Close in upper 40% of candle range and green
+        candle_range = curr_high - curr_low
+        close_pos = (curr_close - curr_low) / candle_range if candle_range > 0 else 0.5
+        is_bullish_candle = (curr_close >= curr_open) and (close_pos >= 0.60)
+
+        if has_volume_surge and is_trend_aligned and is_rsi_healthy and is_bullish_candle:
+            result['signal'] = 'BUY'
+            result['source'] = 'micro_momentum'
+            result['priority_score'] = 45.0 + (max_vol_ratio * 10.0) + (rev_score * 20.0)
+
+        return result
+
     def evaluate(self, symbol: str, df: pd.DataFrame, min_atr_ratio: float = None, rev_score: float = 0.0) -> dict:
         result = {'signal': 'HOLD', 'source': None, 'priority_score': 0.0}
         if df.empty or len(df) < 27:

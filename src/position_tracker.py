@@ -74,7 +74,14 @@ class PositionTracker:
         peak_gain_pct = ((peak_price - entry_price) / entry_price) * 100.0
 
         # 3. Check Trailing Stop arming / activation
-        activation_threshold = TRAILING_STOP_ACTIVATION if TRAILING_STOP_ACTIVATION else 2.0
+        is_micro_scalp = any(k in source.lower() for k in ["micro", "scalp"])
+        is_trend_or_swing = any(k in source.lower() for k in ["breakout", "revolut", "swing", "pullback", "ai", "trend"]) and not is_micro_scalp
+
+        if is_micro_scalp:
+            activation_threshold = 1.2  # Fast scalp activation at +1.2%
+        else:
+            activation_threshold = TRAILING_STOP_ACTIVATION if TRAILING_STOP_ACTIVATION else 2.0
+
         if peak_gain_pct >= activation_threshold and not trailing_active:
             trailing_active = True
             pos["trailing_active"] = True
@@ -85,21 +92,33 @@ class PositionTracker:
             database.upsert_position(pos)
 
         # 4. Handle Stop-Loss, Trailing Stop, and Take-Profit logic per strategy
-        # Tiered Trailing Stop & Dynamic Breathing:
-        # Tier 1 (Gain >= 2.0%): Trail at 1.5% below peak (TRAILING_STOP_DISTANCE), with breakeven floor (+0.2% covering fees)
-        # Tier 2 (Gain >= 3.0%): Runner mode! Trail at 1.5% below peak (allowing 15m candle noise to breathe),
-        #                        while strictly guaranteeing a +1.5% runner profit floor.
         trail_dist_ratio = (TRAILING_STOP_DISTANCE / 100.0) if TRAILING_STOP_DISTANCE else 0.015
-        if peak_gain_pct >= 3.0:
+        if is_micro_scalp:
+            micro_trail = 0.006  # Tight 0.6% trail for fast scalps
+            micro_breakeven_floor = entry_price * 1.003  # +0.3% floor
+            trailing_trigger_price = max(peak_price * (1.0 - micro_trail), micro_breakeven_floor)
+        elif peak_gain_pct >= 3.0:
             runner_floor = entry_price * 1.015  # Guaranteed profit floor of +1.5%
             trailing_trigger_price = max(peak_price * (1.0 - trail_dist_ratio), runner_floor)
         else:
             breakeven_floor = entry_price * 1.002  # +0.2% ensures fees and small profit are locked in
             trailing_trigger_price = max(peak_price * (1.0 - trail_dist_ratio), breakeven_floor)
 
-        is_trend_or_swing = any(k in source.lower() for k in ["breakout", "revolut", "swing", "pullback", "ai", "trend"])
+        if is_micro_scalp:
+            # Fast Micro-Scalp Exits
+            if trailing_active and current_price <= trailing_trigger_price:
+                reason = f"Micro Scalp Trailing Stop hit: Price fell to {current_price:.4f} from peak {peak_price:.4f} (+{gain_pct:.2f}%)"
+                return ("TRAILING_STOP", reason, gain_pct)
 
-        if is_trend_or_swing:
+            if gain_pct <= -1.0:
+                reason = f"Micro Scalp Hard Stop-Loss hit: Price dropped {gain_pct:.2f}% (Limit: -1.0%)"
+                return ("HARD_STOP_LOSS", reason, gain_pct)
+
+            if gain_pct >= 2.5:
+                reason = f"Micro Scalp Take-Profit reached: +{gain_pct:.2f}% (Target: +2.5%)"
+                return ("TAKE_PROFIT", reason, gain_pct)
+
+        elif is_trend_or_swing:
             # Trailing stop fires only if armed and price fell by trail_distance from peak
             if trailing_active and current_price <= trailing_trigger_price:
                 reason = f"Trailing Stop hit: Price fell to {current_price:.4f} from peak {peak_price:.4f} (+{gain_pct:.2f}%)"
@@ -129,7 +148,7 @@ class PositionTracker:
                 reason = f"MR Take-Profit Target reached: +{gain_pct:.2f}% (Target: +2.5%)"
                 return ("TAKE_PROFIT", reason, gain_pct)
 
-        # 5. Stagnation Timeout: Exit momentum-less zombie trades held >= 4 hours without momentum
+        # 5. Stagnation Timeout: Exit momentum-less zombie trades held without momentum
         entry_time_str = pos.get("entry_time")
         if entry_time_str:
             try:
@@ -138,9 +157,10 @@ class PositionTracker:
                 else:
                     entry_dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S")
                 elapsed_sec = (datetime.now() - entry_dt).total_seconds()
-                if elapsed_sec >= 14400.0 and not trailing_active and gain_pct <= 0.4:
-                    elapsed_hours = elapsed_sec / 3600.0
-                    reason = f"Stagnation timeout: held {elapsed_hours:.1f}h without momentum ({gain_pct:+.2f}%)"
+                timeout_threshold = 2700.0 if is_micro_scalp else 14400.0  # 45m for micro scalps, 4h for swings
+                if elapsed_sec >= timeout_threshold and not trailing_active and gain_pct <= 0.4:
+                    elapsed_desc = f"{elapsed_sec/60:.0f}m" if is_micro_scalp else f"{elapsed_sec/3600.0:.1f}h"
+                    reason = f"Stagnation timeout: held {elapsed_desc} without momentum ({gain_pct:+.2f}%)"
                     return ("STAGNATION_TIMEOUT", reason, gain_pct)
             except Exception as e:
                 logger.debug(f"[{symbol}] Could not parse entry_time '{entry_time_str}': {e}")
@@ -183,7 +203,11 @@ class PositionTracker:
         # Losing / Stopped-out trades: 4h cooldown (14400s) to prevent revenge trading or knife-catching
         is_stagnation = "stagnation" in reason.lower()
         is_profitable = (realized_pnl > 0) or (pnl_pct > 0)
-        if is_stagnation:
+        is_micro = "micro" in reason.lower() or "scalp" in reason.lower()
+        if is_micro:
+            cooldown_duration = 600.0 if is_profitable else 900.0  # 10m on profit, 15m on loss/timeout
+            cooldown_reason = f"Micro Scalp Cooldown ({int(cooldown_duration/60)}m): {reason}"
+        elif is_stagnation:
             cooldown_duration = 3600.0  # 1 hour
             cooldown_reason = f"Stagnation Cooldown (1h): {reason}"
         elif is_profitable:

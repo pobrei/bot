@@ -14,7 +14,11 @@ from src.config import (
     REVOLUT_MIN_SCORE,
     MIN_AI_CONFLUENCE_SCORE,
     MIN_ATR_RATIO,
-    BTC_GATE_ENABLED
+    BTC_GATE_ENABLED,
+    MICRO_MOMENTUM_ENABLED,
+    MICRO_TIMEFRAME,
+    MICRO_SCAN_INTERVAL,
+    MICRO_VOLUME_SURGE_RATIO
 )
 from src.market_data import MarketData
 from src.strategy import Strategy
@@ -114,6 +118,7 @@ def main(attempt: int = 0):
     logger.info(f"Mode: {'🟡 DRY RUN' if DRY_RUN else '🟢 LIVE TRADING'}")
     logger.info(f"Dynamic Screener: {'Enabled' if DYNAMIC_SCREENER else 'Disabled'}")
     logger.info(f"Revolut AI Bridge: {'Enabled' if USE_REVOLUT_SIGNALS else 'Disabled'}")
+    logger.info(f"Micro Scalper: {'Enabled (' + MICRO_TIMEFRAME + ')' if MICRO_MOMENTUM_ENABLED else 'Disabled'}")
     logger.info(f"Timeframe: {TIMEFRAME} ({candle_period}s interval)")
     logger.info("=" * 60)
     
@@ -123,6 +128,7 @@ def main(attempt: int = 0):
     logger.info(f"Startup equity baseline recorded: ${startup_equity:.2f}")
 
     last_scan_time = 0
+    last_micro_scan_time = 0
     first_scan = True
     try:
         while True:
@@ -355,6 +361,73 @@ def main(attempt: int = 0):
                                 tracker.record_entry(symbol, fill_price, fill_amount, quote, source=source)
                         else:
                             logger.info(f"[{symbol}] BUY skipped: {reason}")
+
+            # --- Micro-Momentum Scalper (Dual-Timeframe 3m/5m, Phase 2) ---
+            # Evaluates every MICRO_SCAN_INTERVAL seconds when open slots exist
+            if MICRO_MOMENTUM_ENABLED and (current_time - last_micro_scan_time >= MICRO_SCAN_INTERVAL):
+                last_micro_scan_time = current_time
+                active_count = len(tracker.get_open_positions())
+                if active_count < risk_engine.max_positions:
+                    micro_candidates = list(active_symbols) if 'active_symbols' in locals() else list(SYMBOLS)
+                    for m_sym in micro_candidates:
+                        if m_sym in tracker.get_open_positions():
+                            continue
+                        try:
+                            micro_df = market_data.fetch_ohlcv(m_sym, MICRO_TIMEFRAME, limit=35)
+                            if micro_df.empty or len(micro_df) < 25:
+                                continue
+
+                            m_rev_score = 0.0
+                            if USE_REVOLUT_SIGNALS:
+                                m_intel = revolut_bridge.get_sentiment(m_sym)
+                                if m_intel:
+                                    m_rev_score = m_intel.get('composite_score', 0.0)
+
+                            micro_eval = strategy.check_micro_momentum(
+                                m_sym, 
+                                micro_df, 
+                                rev_score=m_rev_score,
+                                min_vol_ratio=MICRO_VOLUME_SURGE_RATIO
+                            )
+
+                            if micro_eval.get('signal') == 'BUY':
+                                m_curr_p = float(micro_df['close'].iloc[-1])
+                                m_pair_quote = m_sym.split('/')[1] if '/' in m_sym else quote_sample
+                                m_priority = micro_eval.get('priority_score', 50.0)
+                                m_source = "micro_momentum+revolut_ai" if m_rev_score >= 0.20 else "micro_momentum"
+
+                                # Check BTC macro gate protection
+                                if 'btc_safe' in locals() and not btc_safe and "BTC/" not in m_sym:
+                                    logger.warning(f"[{m_sym}] Micro BUY suppressed by BTC Macro Gate: {btc_gate_reason}")
+                                    continue
+
+                                is_valid, m_reason, m_size_usd = risk_engine.validate_entry(
+                                    m_sym,
+                                    active_count,
+                                    m_pair_quote,
+                                    current_price=m_curr_p,
+                                    priority_score=m_priority,
+                                    source=m_source
+                                )
+
+                                if is_valid:
+                                    logger.info(
+                                        f"⚡ [MICRO-MOMENTUM SCALPER] Volume surge & momentum triggered on {m_sym} ({MICRO_TIMEFRAME})! "
+                                        f"Order size: ${m_size_usd:.2f} (Priority: {m_priority:.1f})"
+                                    )
+                                    res = executor.execute_order(m_sym, 'buy', m_size_usd)
+                                    if res:
+                                        m_fill_p = res.get('price', m_curr_p)
+                                        m_fill_amt = res.get('amount', 0.0)
+                                        m_quote = res.get('quote', m_pair_quote)
+                                        tracker.record_entry(m_sym, m_fill_p, m_fill_amt, m_quote, source=m_source)
+                                        active_count = len(tracker.get_open_positions())
+                                        if active_count >= risk_engine.max_positions:
+                                            break
+                                else:
+                                    logger.debug(f"[Micro Scalper] {m_sym} BUY skipped by risk engine: {m_reason}")
+                        except Exception as e:
+                            logger.debug(f"[Micro Scalper] Error scanning {m_sym}: {e}")
         
             time.sleep(10)
             
