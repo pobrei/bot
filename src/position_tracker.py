@@ -145,11 +145,11 @@ class PositionTracker:
 
         # 7. Dynamic Trailing Trigger Price & Guaranteed Floors
         if is_micro_scalp:
-            micro_breakeven_floor = entry_price * 1.003  # +0.3% floor
+            micro_breakeven_floor = entry_price * 1.0035  # +0.35% floor (covers round-trip fees + net profit)
             trailing_trigger_price = max(peak_price * (1.0 - trail_dist_ratio), micro_breakeven_floor)
         elif partial_tp_taken or breakeven_locked:
-            # Runner mode: locked risk-free breakeven floor (+0.3% covers fees)
-            runner_floor = entry_price * 1.003
+            # Runner mode: locked risk-free breakeven floor (+0.35% covers fees)
+            runner_floor = entry_price * 1.0035
             if peak_gain_pct >= 3.5:
                 runner_floor = max(runner_floor, entry_price * 1.018)  # Elevate floor to +1.8% as runner expands
             trailing_trigger_price = max(peak_price * (1.0 - trail_dist_ratio), runner_floor)
@@ -157,7 +157,7 @@ class PositionTracker:
             runner_floor = entry_price * 1.015  # Guaranteed profit floor of +1.5%
             trailing_trigger_price = max(peak_price * (1.0 - trail_dist_ratio), runner_floor)
         else:
-            breakeven_floor = entry_price * 1.002  # +0.2% ensures fees and small profit are locked in
+            breakeven_floor = entry_price * 1.0035  # +0.35% ensures fees and small profit are locked in
             trailing_trigger_price = max(peak_price * (1.0 - trail_dist_ratio), breakeven_floor)
 
         # 8. Evaluate Exit Conditions
@@ -223,9 +223,21 @@ class PositionTracker:
                 else:
                     entry_dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S")
                 elapsed_sec = (datetime.now() - entry_dt).total_seconds()
-                timeout_threshold = 2700.0 if is_micro_scalp else 14400.0  # 45m for micro scalps, 4h for swings
-                if elapsed_sec >= timeout_threshold and not trailing_active and gain_pct <= 0.4:
-                    elapsed_desc = f"{elapsed_sec/60:.0f}m" if is_micro_scalp else f"{elapsed_sec/3600.0:.1f}h"
+                # Calibrated stagnation timeouts: Avoid cutting green/developing positions prematurely
+                is_stagnant = False
+                if is_micro_scalp:
+                    # Micro-scalp: 90m for flat/underwater (<= +0.15%), or 3h for sluggish (<= +0.35%)
+                    if elapsed_sec >= 5400.0 and not trailing_active and gain_pct <= 0.15:
+                        is_stagnant = True
+                    elif elapsed_sec >= 10800.0 and not trailing_active and gain_pct <= 0.35:
+                        is_stagnant = True
+                else:
+                    # Swing / Trend: 4h for flat/underwater (<= +0.20%)
+                    if elapsed_sec >= 14400.0 and not trailing_active and gain_pct <= 0.20:
+                        is_stagnant = True
+
+                if is_stagnant:
+                    elapsed_desc = f"{elapsed_sec/60:.0f}m" if elapsed_sec < 3600.0 else f"{elapsed_sec/3600.0:.1f}h"
                     reason = f"Stagnation timeout: held {elapsed_desc} without momentum ({gain_pct:+.2f}%)"
                     return ("STAGNATION_TIMEOUT", reason, gain_pct)
             except Exception as e:

@@ -346,20 +346,12 @@ def main(attempt: int = 0):
                             pos_data['atr_pct'] = candle_atr_pct
                             database.upsert_position(pos_data)
 
-                    if signal == 'SELL':
-                        if symbol in open_positions:
-                            pos_info = open_positions.get(symbol, {})
-                            pos_source = pos_info.get('source', 'unknown')
-                            # Breakout positions seek trends; do not cut them at the middle Bollinger band
-                            if source == 'mean_reversion' and pos_source == 'breakout':
-                                logger.info(f"[{symbol}] Ignoring mean-reversion BBM sell for active breakout position.")
-                                continue
-                            logger.info(f"[{symbol}] SELL signal triggered by strategy indicator flip.")
-                            res = executor.execute_order(symbol, 'sell')
-                            if res:
-                                exit_price = res.get('price', current_price)
-                                tracker.record_exit(symbol, exit_price, f"Strategy indicator flip ({source})")
-                                open_positions = tracker.get_open_positions()
+                    # Note: Exits are strictly governed by PositionTracker (trailing stop, take-profit, stop-loss, 
+                    # stagnation timeout) and Revolut AI emergency invalidation in the 10-second monitoring loop.
+                    # We log the candle SELL signal for diagnostics without prematurely liquidating active positions.
+                    if signal == 'SELL' and symbol in open_positions:
+                        logger.debug(f"[{symbol}] Strategy candle scan evaluated SELL ({source}), position management delegated to PositionTracker.")
+
 
                 # Sort and execute BUY signals based on priority
                 if buy_signals:
