@@ -24,21 +24,28 @@ class Strategy:
             return True, "Insufficient BTC bars, allowing trades"
 
         close_series = btc_df['close']
+        ema_20 = ta.ema(close_series, length=20)
         ema_50 = ta.ema(close_series, length=50)
         curr = btc_df.iloc[-1]
         prev = btc_df.iloc[-2]
         prev2 = btc_df.iloc[-3] if len(btc_df) >= 3 else prev
+        prev4 = btc_df.iloc[-5] if len(btc_df) >= 5 else prev2
 
         curr_close = float(curr['close'])
+        curr_ema20 = float(ema_20.iloc[-1]) if ema_20 is not None and not pd.isna(ema_20.iloc[-1]) else curr_close
         curr_ema50 = float(ema_50.iloc[-1]) if ema_50 is not None and not pd.isna(ema_50.iloc[-1]) else curr_close
 
-        # 1. Fast Dump Gate: 2-bar drop > 0.8%
+        # 1. Fast Dump Gate: 2-bar drop > 0.6% or 4-bar drop > 1.0% (1h)
         two_bar_ret = ((curr_close - float(prev2['close'])) / float(prev2['close'])) * 100.0
-        if two_bar_ret < -0.80:
+        four_bar_ret = ((curr_close - float(prev4['close'])) / float(prev4['close'])) * 100.0
+        if two_bar_ret < -0.60:
             return False, f"BTC sharp dump: {two_bar_ret:.2f}% over last 2 bars"
+        if four_bar_ret < -1.00:
+            return False, f"BTC multi-bar dump: {four_bar_ret:.2f}% over last 4 bars (1h)"
 
-        # 2. Structural Downtrend Gate: Price trading below declining EMA50 with consecutive red bars
-        if curr_close < curr_ema50 * 0.995 and curr_close < float(prev['close']):
+        # 2. Structural Downtrend Gate: Price trading below 50 EMA and below 20 EMA
+        # Strictly blocks altcoin buys during macro downtrends (eliminates single-candle green dead-cat bounce bypass)
+        if curr_close < curr_ema50 * 0.998 and curr_close < curr_ema20:
             return False, f"BTC below 50 EMA ({curr_close:.1f} < {curr_ema50:.1f}) in active downward leg"
 
         return True, "BTC Macro Gate OK"

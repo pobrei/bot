@@ -240,10 +240,12 @@ class RevolutSignalBridge:
         # 2. Ingest high-conviction BUY opportunities from market snapshots (within max_age)
         for symbol, data in intel.items():
             snap_time = data.get("updated_at", 0.0)
+            tech_s = data.get("tech_score", 0.0)
             if (
                 symbol not in seen_symbols 
                 and data["action"] == "BUY" 
                 and data["composite_score"] >= min_score
+                and tech_s >= 0.0  # Technical chart must NOT be bearish
                 and (now - snap_time <= max_age)
             ):
                 candidates.append(data)

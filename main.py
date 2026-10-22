@@ -262,11 +262,13 @@ def main(attempt: int = 0):
                     
                     # Revolut Intelligence
                     rev_score = 0.0
+                    rev_tech = 0.0
                     rev_summary = 'No AI coverage'
                     if USE_REVOLUT_SIGNALS:
                         rev_intel = revolut_bridge.get_sentiment(symbol)
                         if rev_intel:
                             rev_score = rev_intel.get('composite_score', 0.0)
+                            rev_tech = rev_intel.get('tech_score', 0.0)
                             rev_summary = rev_intel.get('summary', '')
 
                     # Strategy Evaluation (passes AI score to enable high-conviction AI Pullbacks)
@@ -278,10 +280,10 @@ def main(attempt: int = 0):
 
                     # Hybrid AI Fusion (Revolut Intelligence)
                     if USE_REVOLUT_SIGNALS:
-                        # Case A: Bearish Veto - Suppress BUYs when news/sentiment is heavily negative
-                        if signal == 'BUY' and rev_score < -0.30:
+                        # Case A: Bearish Veto - Suppress BUYs when news/sentiment is heavily negative OR chart momentum is negative
+                        if signal == 'BUY' and (rev_score < -0.30 or rev_tech < -0.20):
                             logger.warning(
-                                f"[{symbol}] Suppressing technical BUY: Revolut AI is bearish ({rev_score:+.2f}). Rationale: {rev_summary}"
+                                f"[{symbol}] Suppressing technical BUY: Revolut AI is bearish (comp: {rev_score:+.2f}, tech: {rev_tech:+.2f}). Rationale: {rev_summary}"
                             )
                             signal = 'HOLD'
 
@@ -399,10 +401,16 @@ def main(attempt: int = 0):
                                 continue
 
                             m_rev_score = 0.0
+                            m_rev_tech = 0.0
                             if USE_REVOLUT_SIGNALS:
                                 m_intel = revolut_bridge.get_sentiment(m_sym)
                                 if m_intel:
                                     m_rev_score = m_intel.get('composite_score', 0.0)
+                                    m_rev_tech = m_intel.get('tech_score', 0.0)
+
+                            if m_rev_tech < -0.20:
+                                logger.debug(f"[Micro Scalper] {m_sym} BUY skipped: Revolut technical momentum is bearish ({m_rev_tech:+.2f})")
+                                continue
 
                             micro_eval = strategy.check_micro_momentum(
                                 m_sym, 

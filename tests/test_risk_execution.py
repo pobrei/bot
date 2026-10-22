@@ -13,6 +13,8 @@ class TestRiskExecution(unittest.TestCase):
         self.patcher_snapshots = patch('src.risk.get_equity_snapshots', return_value=[])
         self.patcher_kill = patch('src.risk.set_kill_switch')
         
+        self.portfolio.fetch_balances = MagicMock(return_value={'BNB': {'free': 0.0}})
+        
         self.mock_snapshots = self.patcher_snapshots.start()
         self.mock_kill = self.patcher_kill.start()
 
