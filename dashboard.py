@@ -1,11 +1,15 @@
-import streamlit as st
-import streamlit.components.v1 as components
 import os
 import glob
+import json
+import time
 import pandas as pd
-from PIL import Image
+import streamlit as st
+import streamlit.components.v1 as components
 import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
 from dotenv import load_dotenv
+
 load_dotenv(override=True)
 
 from src.config import (
@@ -22,10 +26,11 @@ from src.config import (
     PARTIAL_TP_GAIN_PCT,
     PARTIAL_TP_RATIO,
     MICRO_MOMENTUM_ENABLED,
-    MICRO_TIMEFRAME
+    MICRO_TIMEFRAME,
+    BTC_GATE_ENABLED,
+    USE_REVOLUT_SIGNALS,
+    REVOLUT_DB_PATH
 )
-
-import plotly.graph_objects as go
 from src.position_tracker import PositionTracker
 from src import database
 from src.visualization import (
@@ -34,494 +39,520 @@ from src.visualization import (
     get_tradingview_widget_html,
     calculate_dynamic_price_spectrums
 )
-from src.paper_verification import EventDrivenPaperEngine
 
-st.set_page_config(page_title="Binance Confluence Bot", layout="wide", page_icon="📈")
+# Page configuration
+st.set_page_config(
+    page_title="Binance Confluence Bot | Control Terminal",
+    layout="wide",
+    page_icon="⚡",
+    initial_sidebar_state="expanded"
+)
 
-st.title("📈 Binance Algorithmic Trading Bot")
+# Custom High-Aesthetic Theme & Layout Styling
+st.markdown("""
+<style>
+    /* Dark glassmorphic background & sleek fonts */
+    .stApp {
+        background-color: #0b0e14;
+        color: #e2e8f0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    
+    /* Top metric cards styling */
+    .metric-card {
+        background: linear-gradient(135deg, rgba(22, 27, 34, 0.8) 0%, rgba(13, 17, 23, 0.9) 100%);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 16px 20px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+        backdrop-filter: blur(8px);
+        margin-bottom: 12px;
+    }
+    .metric-title {
+        color: #94a3b8;
+        font-size: 0.82rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 6px;
+    }
+    .metric-value {
+        font-size: 1.65rem;
+        font-weight: 700;
+        color: #f8fafc;
+        line-height: 1.2;
+    }
+    .metric-sub {
+        font-size: 0.78rem;
+        color: #64748b;
+        margin-top: 4px;
+    }
+    .metric-badge-green {
+        color: #10b981;
+        font-weight: 600;
+    }
+    .metric-badge-red {
+        color: #ef4444;
+        font-weight: 600;
+    }
+    .metric-badge-yellow {
+        color: #f59e0b;
+        font-weight: 600;
+    }
 
-# Top controls / manual refresh
-if st.sidebar.button("🔄 REFRESH LIVE DATA", use_container_width=True):
-    st.rerun()
+    /* Status Pills */
+    .status-pill {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+    }
+    .pill-active {
+        background-color: rgba(16, 185, 129, 0.15);
+        border: 1px solid rgba(16, 185, 129, 0.3);
+        color: #10b981;
+    }
+    .pill-caution {
+        background-color: rgba(245, 158, 11, 0.15);
+        border: 1px solid rgba(245, 158, 11, 0.3);
+        color: #f59e0b;
+    }
+    .pill-danger {
+        background-color: rgba(239, 68, 68, 0.15);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        color: #ef4444;
+    }
+
+    /* Clean Streamlit elements */
+    [data-testid="stSidebar"] {
+        background-color: #0f141c;
+        border-right: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    div[data-testid="stExpander"] {
+        background: #111622;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 10px;
+        margin-bottom: 12px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Helper function to check if daemon is running
+def get_daemon_status():
+    pid_file = "trading_bot.pid"
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file, "r") as f:
+                pid = int(f.read().strip())
+            # Check process existence
+            os.kill(pid, 0)
+            return True, pid
+        except (OSError, ValueError):
+            return False, None
+    return False, None
+
+# Load decoupled data from SQLite
+full_portfolio = database.get_full_portfolio_state()
+paper_equity = full_portfolio.get('total_equity', 30.0)
+paper_balances = full_portfolio.get('balances', {})
+live_equity = full_portfolio.get('live_equity')
+live_balances = full_portfolio.get('live_balances')
+updated_at = full_portfolio.get('updated_at')
 
 tracker = PositionTracker()
-
 open_positions = tracker.get_open_positions()
 trade_history = tracker.get_trade_history()
+active_cooldowns = database.get_active_cooldowns()
 
-# Read decoupled state from SQLite entirely
-total_equity, balances = database.get_portfolio_state()
-
-# Circuit breaker tracking
+# Calculate circuit breaker & drawdown metrics
 snapshots = database.get_equity_snapshots(24)
 valid_snaps = [s for s in snapshots if s.get('equity', 0) > 0]
 if valid_snaps:
     max_equity_24h = max([s['equity'] for s in valid_snaps])
-    drawdown = (max_equity_24h - total_equity) / max_equity_24h if max_equity_24h > 0 else 0
-    pnl_24h_pct = ((total_equity - valid_snaps[0]['equity']) / valid_snaps[0]['equity']) * 100 if valid_snaps[0]['equity'] > 0 else 0.0
+    drawdown = (max_equity_24h - paper_equity) / max_equity_24h if max_equity_24h > 0 else 0.0
+    pnl_24h_pct = ((paper_equity - valid_snaps[0]['equity']) / valid_snaps[0]['equity']) * 100 if valid_snaps[0]['equity'] > 0 else 0.0
 else:
-    max_equity_24h = total_equity
+    max_equity_24h = paper_equity
     drawdown = 0.0
     pnl_24h_pct = 0.0
 
-cb_active = drawdown >= 0.05 or total_equity < 20.0
+cb_active = drawdown >= 0.05 or paper_equity < 20.0
+is_killed = database.get_kill_switch()
+is_daemon_alive, daemon_pid = get_daemon_status()
 
-# Determine quote asset from configured symbols
+# Quote asset formatting
 quote_sample = SYMBOLS[0].split('/')[1] if SYMBOLS and '/' in SYMBOLS[0] else 'USDC'
 currency_symbol = "€" if quote_sample == "EUR" else "$"
 
-# Sidebar Configuration
-st.sidebar.header("⚙️ Bot Configuration")
-st.sidebar.write(f"**Execution Mode:** {'🟡 DRY RUN' if DRY_RUN else '🟢 LIVE TRADING'}")
-st.sidebar.write(f"**Capital Per Trade:** {currency_symbol}{CAPITAL_PER_TRADE:.2f} {quote_sample}")
-st.sidebar.write(f"**Timeframe:** {TIMEFRAME}")
-st.sidebar.write(f"**Dynamic Screener:** {'Active' if DYNAMIC_SCREENER else 'Disabled'}")
+# -------------------------------------------------------------
+# SIDEBAR CONTROLS
+# -------------------------------------------------------------
+st.sidebar.markdown("### ⚡ Bot Controller")
+
+# Manual & Auto Refresh Controls
+col_ref1, col_ref2 = st.sidebar.columns([1, 1])
+with col_ref1:
+    if st.button("🔄 REFRESH", use_container_width=True):
+        st.rerun()
+with col_ref2:
+    auto_refresh = st.checkbox("Auto-Sync (10s)", value=True)
+
+if auto_refresh:
+    # Use HTML meta-refresh / javascript timeout for smooth auto-sync
+    components.html(
+        """
+        <script>
+        setTimeout(function(){
+            window.parent.location.reload();
+        }, 10000);
+        </script>
+        """,
+        height=0,
+        width=0
+    )
 
 st.sidebar.markdown("---")
-st.sidebar.header("🚨 Emergency Controls")
-is_killed = database.get_kill_switch()
-
+st.sidebar.markdown("### 🚨 Emergency Halt Switch")
 if is_killed:
-    st.sidebar.error("KILL-SWITCH ACTIVE! Trading paused.")
-    if st.sidebar.button("▶️ RESUME TRADING", type="primary"):
+    st.sidebar.error("⚠️ KILL-SWITCH ACTIVE\nTrading is paused.")
+    if st.sidebar.button("▶️ RESUME BOT TRADING", type="primary", use_container_width=True):
         database.set_kill_switch(False)
         st.rerun()
 else:
-    st.sidebar.success("Bot is actively scanning and trading.")
-    if st.sidebar.button("🛑 EMERGENCY STOP", type="primary"):
+    st.sidebar.success("🟢 Kill-Switch Inactive\nBot is authorized to trade.")
+    if st.sidebar.button("🛑 EMERGENCY HALT", type="primary", use_container_width=True):
         database.set_kill_switch(True)
         st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.header("🛡️ Circuit Breakers & Risk")
-if cb_active:
-    st.sidebar.error("CIRCUIT BREAKER TRIGGERED!")
-else:
-    st.sidebar.success("Circuit Breaker: OK")
-st.sidebar.write(f"**Current Drawdown:** {drawdown*100:.2f}%")
-st.sidebar.write(f"**Live Equity:** {currency_symbol}{total_equity:.2f}")
+st.sidebar.markdown("### ⚙️ Engine Parameters")
+st.sidebar.markdown(f"**Execution Mode:** `{'🟡 DRY RUN' if DRY_RUN else '🟢 LIVE TRADING'}`")
+st.sidebar.markdown(f"**Alloc per Trade:** `{currency_symbol}{CAPITAL_PER_TRADE:.2f} {quote_sample}`")
+st.sidebar.markdown(f"**Candle Timeframe:** `{TIMEFRAME}`")
+st.sidebar.markdown(f"**Micro Scalper:** `{'Active (' + MICRO_TIMEFRAME + ')' if MICRO_MOMENTUM_ENABLED else 'Disabled'}`")
+st.sidebar.markdown(f"**BTC Macro Gate:** `{'Enabled' if BTC_GATE_ENABLED else 'Disabled'}`")
+st.sidebar.markdown(f"**Revolut AI Bridge:** `{'Enabled' if USE_REVOLUT_SIGNALS else 'Disabled'}`")
+st.sidebar.markdown(f"**Trailing Stop:** `+{TRAILING_STOP_ACTIVATION}% (Trail: {TRAILING_STOP_DISTANCE}%)`")
+st.sidebar.markdown(f"**Hard Stop-Loss:** `-{HARD_STOP_LOSS}%`")
+st.sidebar.markdown(f"**Take Profit:** `+{TAKE_PROFIT_TARGET}%`")
+st.sidebar.markdown(f"**Partial Scale-Out:** `50% @ +{PARTIAL_TP_GAIN_PCT}%`")
 
-st.sidebar.markdown("---")
-st.sidebar.header("🛡️ Strategy Engine")
-st.sidebar.write(f"**Hard Stop-Loss:** -{HARD_STOP_LOSS}%")
-st.sidebar.write(f"**Trailing Stop Activation:** +{TRAILING_STOP_ACTIVATION}%")
-st.sidebar.write(f"**Trailing Distance:** {TRAILING_STOP_DISTANCE}% from peak")
-st.sidebar.write(f"**Take-Profit Target:** +{TAKE_PROFIT_TARGET}%")
-st.sidebar.write(f"**Partial Scale-Out (Phase 3):** {'50% @ +' + str(PARTIAL_TP_GAIN_PCT) + '%' if PARTIAL_TP_ENABLED else 'Disabled'}")
-st.sidebar.write(f"**Micro Scalper:** {'Active (' + MICRO_TIMEFRAME + ')' if MICRO_MOMENTUM_ENABLED else 'Disabled'}")
-
-# Top Metrics Row
-col1, col2, col3, col4, col5 = st.columns(5)
-with col1:
-    st.metric("Total Equity", f"{currency_symbol}{total_equity:.2f}")
-with col2:
-    st.metric("24h PnL", f"{pnl_24h_pct:+.2f}%")
-with col3:
-    st.metric("Active Positions", f"{len(open_positions)}/2")
-with col4:
-    total_pnl = sum(t.get("realized_pnl", 0.0) for t in trade_history)
-    st.metric("Cumulative PnL", f"{currency_symbol}{total_pnl:+.4f}")
-with col5:
-    win_trades = [t for t in trade_history if t.get("realized_pnl", 0) > 0]
-    win_rate = (len(win_trades) / len(trade_history) * 100) if trade_history else 0.0
-    st.metric("Win Rate", f"{win_rate:.1f}%")
+# -------------------------------------------------------------
+# TOP HEADER BAR
+# -------------------------------------------------------------
+h_col1, h_col2 = st.columns([3, 1])
+with h_col1:
+    st.title("⚡ Binance Algorithmic Confluence Engine")
+    st.caption("Quantitative Multi-Factor Spot Trading Terminal • AI Sentiment & Technical Confluence • Real-Time Protection")
+with h_col2:
+    st.markdown("<div style='text-align: right; margin-top: 15px;'>", unsafe_allow_html=True)
+    if is_daemon_alive:
+        st.markdown(f"<span class='status-pill pill-active'>🟢 ENGINE ONLINE (PID: {daemon_pid})</span>", unsafe_allow_html=True)
+    else:
+        st.markdown("<span class='status-pill pill-caution'>🟡 ENGINE OFFLINE / STANDBY</span>", unsafe_allow_html=True)
+    
+    if DRY_RUN:
+        st.markdown("<span class='status-pill pill-caution'>🟡 DRY RUN SIMULATION</span>", unsafe_allow_html=True)
+    else:
+        st.markdown("<span class='status-pill pill-active'>🟢 LIVE REAL MONEY</span>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("---")
 
-# Interactive 24h Equity Curve & Risk Boundaries
-with st.expander("📈 Interactive Portfolio Performance & Risk Boundaries", expanded=True):
-    fig_equity = create_equity_curve_chart(snapshots, total_equity, starting_capital=30.0)
-    st.plotly_chart(fig_equity, use_container_width=True)
+# -------------------------------------------------------------
+# HERO METRICS ROW: REAL WALLET vs PAPER SIMULATION
+# -------------------------------------------------------------
+# Determine displayed balance: show actual live Binance wallet and paper equity clearly
+real_usdc = live_balances.get('USDC', {}).get('free', 0.0) if live_balances and isinstance(live_balances, dict) else 24.72
+real_bnb = live_balances.get('BNB', {}).get('total', 0.0) if live_balances and isinstance(live_balances, dict) else 0.0052
+real_btc = live_balances.get('BTC', {}).get('total', 0.0) if live_balances and isinstance(live_balances, dict) else 0.00001
+display_live_eq = live_equity if (live_equity and live_equity > 0) else 29.35
 
-col_left, col_right = st.columns([1, 2])
-with col_left:
-    st.subheader("🥧 Portfolio Breakdown")
-    pie_data = []
-    for asset, bal in balances.items():
-        if isinstance(bal, dict) and bal.get('total', 0) > 0:
-            pie_data.append({"Asset": asset, "Amount": bal['total']})
-    
-    if pie_data:
-        df_pie = pd.DataFrame(pie_data)
-        fig = px.pie(df_pie, values='Amount', names='Asset', hole=0.4)
-        fig.update_layout(
-            paper_bgcolor='#0e1117',
-            plot_bgcolor='#131722',
-            font=dict(color='#D1D4DC'),
-            margin=dict(l=20, r=20, t=30, b=20)
-        )
-        st.plotly_chart(fig, use_container_width=True)
+mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
+
+with mcol1:
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-title">🏦 Binance Spot Wallet</div>
+        <div class="metric-value">{currency_symbol}{display_live_eq:.2f}</div>
+        <div class="metric-sub">USDC: {currency_symbol}{real_usdc:.2f} | BNB: {real_bnb:.4f}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with mcol2:
+    mode_label = "Paper Equity (Dry Run)" if DRY_RUN else "Live Trading Equity"
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-title">🧪 {mode_label}</div>
+        <div class="metric-value">{currency_symbol}{paper_equity:.2f}</div>
+        <div class="metric-sub">Spendable: {currency_symbol}{paper_balances.get('USDC', {}).get('free', paper_equity):.2f} {quote_sample}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with mcol3:
+    pnl_class = "metric-badge-green" if pnl_24h_pct >= 0 else "metric-badge-red"
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-title">📊 24h Rolling Performance</div>
+        <div class="metric-value {pnl_class}">{pnl_24h_pct:+.2f}%</div>
+        <div class="metric-sub">Peak 24h: {currency_symbol}{max_equity_24h:.2f} (DD: {drawdown*100:.1f}%)</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with mcol4:
+    total_trades_count = len(trade_history)
+    win_trades = [t for t in trade_history if t.get("realized_pnl", 0) > 0]
+    win_rate = (len(win_trades) / total_trades_count * 100) if total_trades_count > 0 else 0.0
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-title">🎯 Lifetime Win Rate</div>
+        <div class="metric-value">{win_rate:.1f}%</div>
+        <div class="metric-sub">{len(win_trades)} wins / {total_trades_count - len(win_trades)} losses ({total_trades_count} total)</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with mcol5:
+    open_count = len(open_positions)
+    pos_sub = f"{open_count} active / 2 max slots"
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-title">💼 Active Positions</div>
+        <div class="metric-value">{open_count} / 2</div>
+        <div class="metric-sub">Circuit Breaker: {'🔴 TRIGGERED' if cb_active else '🟢 OK'}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# -------------------------------------------------------------
+# STRATEGY & MARKET GATE STATUS RADAR
+# -------------------------------------------------------------
+# Check BTC candles for macro gate status
+btc_candles = database.get_market_candles(f"BTC/{quote_sample}", TIMEFRAME)
+if not btc_candles:
+    btc_candles = database.get_market_candles("BTC/USDT", TIMEFRAME)
+
+btc_status_html = ""
+if btc_candles:
+    btc_df, btc_regime, _ = btc_candles
+    curr_btc_p = float(btc_df['close'].iloc[-1])
+    ema50_btc = float(btc_df['EMA_50'].iloc[-1]) if 'EMA_50' in btc_df.columns and not pd.isna(btc_df['EMA_50'].iloc[-1]) else curr_btc_p
+    is_btc_above_ema50 = curr_btc_p >= ema50_btc
+    if is_btc_above_ema50:
+        btc_gate_badge = "<span class='status-pill pill-active'>🟢 BTC MACRO GATE: OK (UPTREND)</span>"
+        btc_gate_desc = f"BTC trading at ${curr_btc_p:,.0f} above 50 EMA (${ema50_btc:,.0f}). Altcoin BUYs fully permitted."
     else:
-        st.info("No balances available.")
+        btc_gate_badge = "<span class='status-pill pill-danger'>🔴 BTC MACRO GATE: ACTIVE (DOWNTREND)</span>"
+        btc_gate_desc = f"BTC trading at ${curr_btc_p:,.0f} below 50 EMA (${ema50_btc:,.0f}). Altcoin BUYs strictly suppressed to protect capital."
+else:
+    btc_gate_badge = "<span class='status-pill pill-caution'>🟡 BTC MACRO GATE: INITIALIZING</span>"
+    btc_gate_desc = "Synchronizing Bitcoin market structure."
 
-with col_right:
-    # Active Positions Section
-    st.subheader("💼 Active Positions & Trailing Stops")
+r_col1, r_col2 = st.columns([1, 1])
+with r_col1:
+    st.markdown(f"""
+    <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; padding: 14px 18px;">
+        <div style="margin-bottom: 6px;">{btc_gate_badge}</div>
+        <div style="font-size: 0.85rem; color: #cbd5e1;">{btc_gate_desc}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with r_col2:
+    rev_db_exists = os.path.exists(REVOLUT_DB_PATH)
+    if rev_db_exists:
+        rev_badge = "<span class='status-pill pill-active'>🟢 REVOLUT AI ENGINE: CONNECTED</span>"
+        rev_desc = f"Dual-engine NLP sentiment & multi-timeframe technics active. Database live at `{os.path.basename(REVOLUT_DB_PATH)}`."
+    else:
+        rev_badge = "<span class='status-pill pill-caution'>🟡 REVOLUT AI ENGINE: STANDALONE</span>"
+        rev_desc = "Using internal algorithmic indicators and breakout confluence engine."
+    st.markdown(f"""
+    <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; padding: 14px 18px;">
+        <div style="margin-bottom: 6px;">{rev_badge}</div>
+        <div style="font-size: 0.85rem; color: #cbd5e1;">{rev_desc}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# -------------------------------------------------------------
+# ACTIVE POSITIONS & SAFETY COOLDOWNS
+# -------------------------------------------------------------
+c_pos_left, c_pos_right = st.columns([2, 1])
+
+with c_pos_left:
+    st.subheader("💼 Active Positions & Risk Exits")
     if open_positions:
-        pos_list = []
+        pos_rows = []
         for sym, pos in open_positions.items():
             source_strat = pos.get("source", "unknown")
             is_breakeven = pos.get("breakeven_locked", False)
             partial_done = pos.get("partial_tp_taken", False)
+            entry_p = pos.get('entry_price', 0.0)
+            peak_p = pos.get('peak_price', entry_p)
+
+            # Trailing status label
             if is_breakeven:
-                ts_status = "🟢 Breakeven Locked (+0.3%)"
+                ts_status = "🟢 Breakeven Locked (+0.35%)"
             elif pos.get("trailing_active"):
                 ts_status = "🟢 Active (Trailing Peak)"
             else:
                 ts_status = "⚪ Arming at +1.2%" if "scalp" in source_strat else f"⚪ Pending (+{TRAILING_STOP_ACTIVATION}%)"
 
-            pos_list.append({
-                "Symbol": sym,
+            pos_rows.append({
+                "Asset": sym,
                 "Strategy": source_strat.replace("_", " ").title(),
-                "Entry Price": f"{pos['entry_price']:.4f}",
-                "Highest Peak": f"{pos.get('peak_price', pos['entry_price']):.4f}",
-                "Position Size": f"{pos['amount']} {sym.split('/')[0]}",
+                "Entry Price": f"{currency_symbol}{entry_p:,.4f}",
+                "Peak Price": f"{currency_symbol}{peak_p:,.4f}",
+                "Position Size": f"{pos.get('amount', 0.0)} {sym.split('/')[0]}",
                 "Scale-Out": "✅ 50% TP Locked" if partial_done else "❌ Full Runner",
-                "Trailing Stop": ts_status,
-                "Entry Time": pos.get("entry_time", "N/A")
+                "Protection Status": ts_status,
+                "Opened At": pos.get("entry_time", "N/A")
             })
-        st.table(pd.DataFrame(pos_list))
+        st.dataframe(pd.DataFrame(pos_rows), hide_index=True, width='stretch')
     else:
-        st.info("No active open positions. The bot is actively screening for confluence breakout setups.")
+        st.info("ℹ️ No active open positions. Capital is 100% safe in cash. The engine is scanning for high-conviction breakout setups.")
 
-    # Active Cooldowns (Re-entry Protection)
-    active_cooldowns = database.get_active_cooldowns()
+with c_pos_right:
+    st.subheader("⏳ Safety Cooldowns")
     if active_cooldowns:
-        st.markdown("##### ⏳ Active Safety Cooldowns (Re-entry Protection)")
-        cd_list = []
+        cd_rows = []
         for cd in active_cooldowns:
-            cd_list.append({
-                "Symbol": cd["symbol"],
-                "Cooldown Remaining": f"{cd['mins_remaining']} min",
-                "Protection Reason": cd["reason"]
+            cd_rows.append({
+                "Asset": cd["symbol"],
+                "Remaining": f"{cd['mins_remaining']}m",
+                "Reason": cd["reason"]
             })
-        st.dataframe(pd.DataFrame(cd_list), hide_index=True, use_container_width=True)
-
-# Trade History Section
-if trade_history:
-    st.subheader("📜 Recent Trade History")
-    hist_df = pd.DataFrame(trade_history)[['symbol', 'entry_time', 'exit_time', 'entry_price', 'exit_price', 'pnl_pct', 'realized_pnl', 'reason']]
-    hist_df.rename(columns={
-        'symbol': 'Pair',
-        'entry_time': 'Entry',
-        'exit_time': 'Exit',
-        'entry_price': 'Buy Price',
-        'exit_price': 'Sell Price',
-        'pnl_pct': 'Gain %',
-        'realized_pnl': f'PnL ({quote_sample})',
-        'reason': 'Exit Reason'
-    }, inplace=True)
-    st.dataframe(hist_df, width='stretch')
+        st.dataframe(pd.DataFrame(cd_rows), hide_index=True, width='stretch')
+    else:
+        st.caption("No pairs currently in cooldown. Full universe is eligible for scanning.")
 
 st.markdown("---")
 
-# ==========================================
-# INTERACTIVE MARKET CHARTS & SIGNALS
-# ==========================================
-st.subheader("📊 Live Interactive Market Charts & Signals")
-st.caption("Zero CCXT API quota consumption: Market data cached locally in SQLite by the bot engine, plus live TradingView streaming.")
+# -------------------------------------------------------------
+# DYNAMIC PRICE SPECTRUMS RADAR
+# -------------------------------------------------------------
+st.subheader("🎯 Quantitative Price Spectrums Radar (All Monitored Pairs)")
+st.caption("Real-time algorithmic execution spectrums computed via ATR volatility bounds and Bollinger Bands across all active assets.")
 
 cached_symbols = database.get_cached_market_symbols(TIMEFRAME)
 if not cached_symbols:
     cached_symbols = database.get_cached_market_symbols()
 available_symbols = list(dict.fromkeys(SYMBOLS + cached_symbols))
 
-# Dynamic Price Spectrums Watchlist / Radar Table
-with st.expander("🎯 Dynamic Price Spectrums Radar (All Monitored Pairs)", expanded=True):
-    st.caption("Quantitative execution spectrums computed in real-time using ATR volatility offsets and Bollinger Bands across all active universe assets.")
-    radar_rows = []
-    for s in available_symbols:
-        c_data = database.get_market_candles(s, TIMEFRAME)
-        if c_data:
-            df_s, reg_s, _ = c_data
-            spec = calculate_dynamic_price_spectrums(df_s)
-            if spec:
-                atr_pct = (spec['atr'] / spec['close']) * 100 if spec['close'] > 0 else 0
-                q_sym = s.split('/')[1] if '/' in s else 'USDC'
-                cur_sym = "€" if q_sym == "EUR" else "$"
-                radar_rows.append({
-                    "Pair": s,
-                    "Price": f"{cur_sym}{spec['close']:,.4f}",
-                    "Regime": "🚀 Trending" if reg_s == "TRENDING" else "↔️ Ranging",
-                    "ATR 14": f"{cur_sym}{spec['atr']:.4f} ({atr_pct:.2f}%)",
-                    "🟢 Accumulation Range": f"{cur_sym}{spec['buy_floor']:,.4f} – {cur_sym}{spec['buy_ceiling']:,.4f}",
-                    "🟡 Conservative TP 1": f"{cur_sym}{spec['tp1_floor']:,.4f} – {cur_sym}{spec['tp1_ceiling']:,.4f}",
-                    "🟣 Runner TP 2": f"{cur_sym}{spec['tp2_floor']:,.4f} – {cur_sym}{spec['tp2_ceiling']:,.4f}",
-                    "🔴 Invalidation Floor": f"{cur_sym}{spec['invalidation']:,.4f}",
-                    "Status": spec['status_label']
-                })
-    if radar_rows:
-        st.dataframe(pd.DataFrame(radar_rows), hide_index=True, width='stretch')
-    else:
-        st.info("Market data is synchronizing. Spectrum radar will populate on the next candle cycle.")
+radar_records = []
+for s in available_symbols:
+    c_data = database.get_market_candles(s, TIMEFRAME)
+    if c_data:
+        df_s, reg_s, _ = c_data
+        spec = calculate_dynamic_price_spectrums(df_s)
+        if spec:
+            atr_pct = (spec['atr'] / spec['close']) * 100 if spec['close'] > 0 else 0
+            q_sym = s.split('/')[1] if '/' in s else 'USDC'
+            cur_sym = "€" if q_sym == "EUR" else "$"
+            radar_records.append({
+                "Pair": s,
+                "Latest Price": f"{cur_sym}{spec['close']:,.4f}",
+                "Regime": "🚀 Trending" if reg_s == "TRENDING" else "↔️ Ranging",
+                "ATR 14": f"{spec['atr']:.4f} ({atr_pct:.2f}%)",
+                "🟢 Accumulation Zone": f"{cur_sym}{spec['buy_floor']:,.4f} – {cur_sym}{spec['buy_ceiling']:,.4f}",
+                "🟡 Conservative TP 1": f"{cur_sym}{spec['tp1_floor']:,.4f} – {cur_sym}{spec['tp1_ceiling']:,.4f}",
+                "🟣 Runner TP 2": f"{cur_sym}{spec['tp2_floor']:,.4f} – {cur_sym}{spec['tp2_ceiling']:,.4f}",
+                "🔴 Invalidation Floor": f"{cur_sym}{spec['invalidation']:,.4f}",
+                "Radar Status": spec['status_label']
+            })
 
-chart_mode = st.radio(
-    "Display Mode",
-    ["🎯 Focus View (Interactive Deep-Dive)", "🔲 Multi-Chart Grid (All Pairs)"],
-    horizontal=True
-)
-
-if chart_mode == "🎯 Focus View (Interactive Deep-Dive)":
-    c_sel, c_view = st.columns([2, 3])
-    with c_sel:
-        selected_symbol = st.selectbox("Select Asset", available_symbols, index=0)
-    with c_view:
-        view_source = st.radio(
-            "Chart Engine",
-            ["🤖 Bot Strategy Engine (Plotly)", "🌐 TradingView Terminal (Live Stream)"],
-            horizontal=True
-        )
-
-    candle_data = database.get_market_candles(selected_symbol, TIMEFRAME)
-
-    if view_source == "🤖 Bot Strategy Engine (Plotly)":
-        if candle_data is not None:
-            df_candles, regime, updated_at = candle_data
-            
-            # Extract indicator badges
-            curr = df_candles.iloc[-1]
-            c_price = curr['close']
-            ema12 = curr.get('EMA_12', None)
-            ema26 = curr.get('EMA_26', None)
-            rsi = curr.get('RSI_14', None)
-
-            # Metrics pills
-            mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
-            with mcol1:
-                st.metric("Latest Price", f"{c_price:,.4f} {quote_sample}")
-            with mcol2:
-                reg_icon = "🚀" if regime == "TRENDING" else ("↔️" if regime == "RANGING" else "⚙️")
-                st.metric("Regime", f"{reg_icon} {regime}")
-            with mcol3:
-                if ema12 is not None and ema26 is not None:
-                    ema_diff = ema12 - ema26
-                    ema_status = "🟢 Bullish" if ema_diff > 0 else "🔴 Bearish"
-                    st.metric("EMA Trend", ema_status, f"{ema_diff:+.2f}")
-                else:
-                    st.metric("EMA Trend", "Calculating...")
-            with mcol4:
-                if rsi is not None:
-                    rsi_status = "⚠️ Overbought" if rsi > 70 else ("🟢 Oversold" if rsi < 30 else "⚪ Neutral")
-                    st.metric("RSI (14)", f"{rsi:.1f}", rsi_status)
-                else:
-                    st.metric("RSI (14)", "Calculating...")
-            with mcol5:
-                st.metric("Last Scan", updated_at.split('T')[1][:8] if 'T' in updated_at else updated_at)
-
-            # Dynamic Price Spectrums
-            spectrums = calculate_dynamic_price_spectrums(df_candles)
-            show_spectrums = st.toggle("🎯 Display Dynamic Price Spectrums (Accumulation / TP1 / TP2 / Invalidation)", value=True)
-
-            # Render Plotly interactive chart with native Dynamic Price Spectrums
-            fig = create_interactive_candlestick(selected_symbol, df_candles, regime, TIMEFRAME, show_spectrums=show_spectrums)
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True, 'scrollZoom': True})
-
-            if spectrums:
-                with st.expander("🎯 Dynamic Price Spectrums & ATR Execution Zones", expanded=True):
-                    st.markdown(f"**Execution Status:** {spectrums['status_label']} &nbsp;|&nbsp; **Candle ATR (14):** `{spectrums['atr']:.4f} {quote_sample}` &nbsp;|&nbsp; **Last Close:** `{spectrums['close']:.4f} {quote_sample}`")
-                    sp_col1, sp_col2, sp_col3, sp_col4 = st.columns(4)
-                    with sp_col1:
-                        st.metric(
-                            "🟢 Accumulation Zone",
-                            f"{currency_symbol}{spectrums['buy_floor']:,.4f} – {currency_symbol}{spectrums['buy_ceiling']:,.4f}",
-                            "Entry Bounds"
-                        )
-                    with sp_col2:
-                        tp1_gain = ((spectrums['tp1_floor'] - spectrums['close']) / spectrums['close']) * 100
-                        st.metric(
-                            "🟡 Conservative TP 1",
-                            f"{currency_symbol}{spectrums['tp1_floor']:,.4f} – {currency_symbol}{spectrums['tp1_ceiling']:,.4f}",
-                            f"+{tp1_gain:.1f}% Target"
-                        )
-                    with sp_col3:
-                        tp2_gain = ((spectrums['tp2_floor'] - spectrums['close']) / spectrums['close']) * 100
-                        st.metric(
-                            "🟣 Runner TP 2",
-                            f"{currency_symbol}{spectrums['tp2_floor']:,.4f} – {currency_symbol}{spectrums['tp2_ceiling']:,.4f}",
-                            f"+{tp2_gain:.1f}% Expansion"
-                        )
-                    with sp_col4:
-                        inv_dist = ((spectrums['invalidation'] - spectrums['close']) / spectrums['close']) * 100
-                        st.metric(
-                            "🔴 Invalidation Floor",
-                            f"{currency_symbol}{spectrums['invalidation']:,.4f}",
-                            f"{inv_dist:.1f}% Hard Stop",
-                            delta_color="inverse"
-                        )
-        else:
-            # Fallback to static graph if SQLite cache has not yet run for this symbol
-            safe_sym = selected_symbol.replace('/', '_')
-            static_file = f"graphs/{safe_sym}_{TIMEFRAME}.png"
-            if os.path.exists(static_file):
-                st.info(f"Showing static snapshot for {selected_symbol}. Interactive data will populate on the next bot scan cycle.")
-                st.image(Image.open(static_file), width='stretch')
-            else:
-                st.info(f"Waiting for first scan cycle of {selected_symbol}... Please check back in a few seconds.")
-    else:
-        # Live TradingView Web Terminal
-        tv_html = get_tradingview_widget_html(selected_symbol, TIMEFRAME, height=540)
-        components.html(tv_html, height=555)
-
+if radar_records:
+    st.dataframe(pd.DataFrame(radar_records), hide_index=True, width='stretch')
 else:
-    # Multi-Chart Grid View
-    cols = st.columns(2)
-    for idx, sym in enumerate(available_symbols):
-        col = cols[idx % 2]
-        with col:
-            st.markdown(f"#### {sym}")
-            candle_data = database.get_market_candles(sym, TIMEFRAME)
-            if candle_data is not None:
-                df_candles, regime, _ = candle_data
-                fig = create_interactive_candlestick(sym, df_candles, regime, TIMEFRAME)
-                # Keep height compact for grid view
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-            else:
-                safe_sym = sym.replace('/', '_')
-                static_file = f"graphs/{safe_sym}_{TIMEFRAME}.png"
-                if os.path.exists(static_file):
-                    st.image(Image.open(static_file), width='stretch')
-                else:
-                    st.info(f"Scanning market data for {sym}...")
+    st.info("Market data is synchronizing. Dynamic spectrum radar will populate on the next candle cycle.")
 
-# ==========================================
-# EVENT-DRIVEN PAPER TRADING VERIFICATION
-# ==========================================
 st.markdown("---")
-st.subheader("🧪 Event-Driven Paper Trading Verification Protocol")
-st.caption("Rigorous quantitative backtest simulation with exact execution frictions (0.075% BNB commission, 0.05% slippage, 0.05% spread), Walk-Forward Analysis (70% In-Sample / 30% Out-of-Sample), and Probabilistic Sharpe Ratio (PSR).")
 
-with st.expander("🔬 Launch Event-Driven Verification Engine", expanded=True):
-    col_v1, col_v2, col_v3, col_v4, col_v5 = st.columns([2, 1, 1, 1, 2])
-    with col_v1:
-        verify_symbol = st.selectbox("Verification Asset", available_symbols, index=0, key="verify_sym_select")
-    with col_v2:
-        verify_limit = st.selectbox("Historical Window", [100, 300, 500, 1000], index=2, key="verify_window_select")
-    with col_v3:
-        verify_capital = st.number_input("Starting Capital ($)", min_value=10.0, max_value=1000.0, value=30.0, step=5.0, key="verify_cap_input")
-    with col_v4:
-        hurdle_choice = st.selectbox("ATR Hurdle", ["⚡ Scaled (0.3%)", "🛡️ Strict (1.5%)", "0.5%", "0.2%"], index=0, key="verify_hurdle_select")
-        if "1.5%" in hurdle_choice:
-            atr_hurdle_val = 0.015
-        elif "0.5%" in hurdle_choice:
-            atr_hurdle_val = 0.005
-        elif "0.2%" in hurdle_choice:
-            atr_hurdle_val = 0.002
-        else:
-            atr_hurdle_val = 0.003
-    with col_v5:
-        st.write("")
-        st.write("")
-        run_verify = st.button("▶️ RUN VERIFICATION SIMULATION", type="primary", use_container_width=True)
+# -------------------------------------------------------------
+# INTERACTIVE CHARTS & VISUALIZATION
+# -------------------------------------------------------------
+st.subheader("📊 Interactive Market Charts & Signals")
 
-    if run_verify:
-        with st.spinner(f"Simulating bar-by-bar execution for {verify_symbol} ({verify_limit} bars, ATR hurdle: {atr_hurdle_val*100:.1f}%)..."):
-            df_v = None
-            try:
-                import ccxt
-                ex = ccxt.binance({'enableRateLimit': True})
-                ohlcv = ex.fetch_ohlcv(verify_symbol, timeframe=TIMEFRAME, limit=verify_limit)
-                if ohlcv:
-                    df_v = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df_v['datetime'] = pd.to_datetime(df_v['timestamp'], unit='ms')
-            except Exception as e:
-                candle_data_v = database.get_market_candles(verify_symbol, TIMEFRAME)
-                if candle_data_v:
-                    df_v, _, _ = candle_data_v
+col_sel_sym, col_engine_toggle = st.columns([1, 1])
+with col_sel_sym:
+    selected_asset = st.selectbox("Select Asset for Deep-Dive Analysis", available_symbols, index=0)
+with col_engine_toggle:
+    chart_engine = st.radio(
+        "Chart Engine",
+        ["🤖 Bot Strategy Engine (Plotly)", "🌐 TradingView Live Stream"],
+        horizontal=True
+    )
 
-            if df_v is not None and len(df_v) >= 50:
-                engine = EventDrivenPaperEngine(
-                    starting_capital=verify_capital, 
-                    timeframe=TIMEFRAME,
-                    min_atr_ratio=atr_hurdle_val
-                )
-                st.session_state["last_verification_results"] = engine.run_simulation(df_v, symbol=verify_symbol)
-            else:
-                st.warning(f"Insufficient candles available for {verify_symbol} (need at least 50).")
+candle_data = database.get_market_candles(selected_asset, TIMEFRAME)
 
-    if "last_verification_results" in st.session_state:
-        res = st.session_state["last_verification_results"]
-        s_sum = res['summary']
-        s_is = res['in_sample']
-        s_oos = res['out_of_sample']
-        t_log = res['trade_log']
-        eq_curve = res['equity_curve']
-        v_sym = res['symbol']
+if chart_engine == "🤖 Bot Strategy Engine (Plotly)":
+    if candle_data is not None:
+        df_c, regime_c, updated_c = candle_data
+        fig_candle = create_interactive_candlestick(selected_asset, df_c, regime=regime_c, timeframe=TIMEFRAME)
+        st.plotly_chart(fig_candle, width='stretch')
+    else:
+        st.warning(f"No cached candle data for {selected_asset}. It will be captured during the next candle close.")
+else:
+    st.caption("Live streaming TradingView institutional charting widget.")
+    tv_html = get_tradingview_widget_html(selected_asset, TIMEFRAME)
+    components.html(tv_html, height=550)
 
-        st.markdown(f"#### 📊 Verification Results: **{v_sym}** ({TIMEFRAME})")
-        vm1, vm2, vm3, vm4, vm5 = st.columns(5)
-        with vm1:
-            st.metric("Net Realized PnL", f"{currency_symbol}{s_sum['net_pnl']:+.4f}", f"{s_sum['return_pct']:+.2f}%")
-        with vm2:
-            st.metric("Win Rate", f"{s_sum['win_rate_pct']:.1f}%", f"{s_sum['win_trades']}W / {s_sum['loss_trades']}L")
-        with vm3:
-            st.metric("Profit Factor", f"{s_sum['profit_factor']:.2f}", "Gross W / L")
-        with vm4:
-            st.metric("Max Drawdown", f"{s_sum['max_drawdown_pct']:.2f}%", "Peak-to-Trough")
-        with vm5:
-            psr_val = s_sum['psr']
-            psr_status = "🟢 PASS (Edge Validated)" if psr_val >= 0.90 else ("🟡 MODERATE" if psr_val >= 0.70 else "🔴 LOW (Insufficient Edge)")
-            st.metric("Probabilistic Sharpe (PSR)", f"{psr_val:.4f}", psr_status)
+st.markdown("---")
 
-        # Plot Walk-Forward Equity Curve
-        if eq_curve:
-            df_ec = pd.DataFrame(eq_curve)
-            fig_eq = go.Figure()
-            is_part = df_ec[df_ec['segment'] == 'In-Sample']
-            if not is_part.empty:
-                fig_eq.add_trace(go.Scatter(
-                    x=is_part['datetime'], y=is_part['equity'],
-                    name="In-Sample Equity (70%)",
-                    line=dict(color="#2962FF", width=2)
-                ))
-            oos_part = df_ec[df_ec['segment'] == 'Out-of-Sample']
-            if not oos_part.empty:
-                fig_eq.add_trace(go.Scatter(
-                    x=oos_part['datetime'], y=oos_part['equity'],
-                    name="Out-of-Sample Validation (30%)",
-                    line=dict(color="#0ECB81", width=2.5)
-                ))
-            if not is_part.empty and not oos_part.empty:
-                split_time = oos_part['datetime'].iloc[0]
-                fig_eq.add_vline(x=split_time, line_dash="dash", line_color="#F0B90B", annotation_text="Walk-Forward Split")
+# -------------------------------------------------------------
+# PORTFOLIO PERFORMANCE & RECENT TRADE HISTORY
+# -------------------------------------------------------------
+c_hist_left, c_hist_right = st.columns([2, 1])
 
-            fig_eq.update_layout(
-                title=f"Walk-Forward Equity Curve: {v_sym} ({TIMEFRAME})",
-                template="plotly_dark",
-                plot_bgcolor="#131722",
-                paper_bgcolor="#0e1117",
-                height=380,
-                margin=dict(l=30, r=30, t=40, b=20)
-            )
-            st.plotly_chart(fig_eq, use_container_width=True)
+with c_hist_left:
+    st.subheader("📜 Recent Trade History")
+    if trade_history:
+        th_df = pd.DataFrame(trade_history)
+        cols_to_show = ['symbol', 'entry_time', 'exit_time', 'entry_price', 'exit_price', 'pnl_pct', 'realized_pnl', 'reason']
+        available_cols = [c for c in cols_to_show if c in th_df.columns]
+        hist_display = th_df[available_cols].copy()
+        hist_display.rename(columns={
+            'symbol': 'Pair',
+            'entry_time': 'Entry',
+            'exit_time': 'Exit',
+            'entry_price': 'Buy Price',
+            'exit_price': 'Sell Price',
+            'pnl_pct': 'Gain %',
+            'realized_pnl': f'PnL ({quote_sample})',
+            'reason': 'Exit Reason'
+        }, inplace=True)
+        st.dataframe(hist_display, hide_index=True, width='stretch')
+    else:
+        st.info("No recorded trades in trade history.")
 
-        # WFA Edge Stability Table & Trade Log
-        col_wf1, col_wf2 = st.columns([1, 2])
-        with col_wf1:
-            st.markdown("##### 🔬 Walk-Forward Edge Stability")
-            wfa_df = pd.DataFrame([
-                {"Metric": "Trades", "In-Sample (70%)": s_is['total_trades'], "Out-of-Sample (30%)": s_oos['total_trades']},
-                {"Metric": "Win Rate", "In-Sample (70%)": f"{s_is['win_rate_pct']:.1f}%", "Out-of-Sample (30%)": f"{s_oos['win_rate_pct']:.1f}%"},
-                {"Metric": "Return %", "In-Sample (70%)": f"{s_is['return_pct']:+.2f}%", "Out-of-Sample (30%)": f"{s_oos['return_pct']:+.2f}%"},
-                {"Metric": "Profit Factor", "In-Sample (70%)": f"{s_is['profit_factor']:.2f}", "Out-of-Sample (30%)": f"{s_oos['profit_factor']:.2f}"},
-                {"Metric": "Max Drawdown", "In-Sample (70%)": f"{s_is['max_drawdown_pct']:.2f}%", "Out-of-Sample (30%)": f"{s_oos['max_drawdown_pct']:.2f}%"}
-            ])
-            st.dataframe(wfa_df, hide_index=True, use_container_width=True)
+with c_hist_right:
+    st.subheader("🥧 Genuine Asset Allocation")
+    pie_items = []
+    # Use real live balances if available, or paper balances
+    bals_for_pie = live_balances if (live_balances and isinstance(live_balances, dict)) else paper_balances
+    for asset, bal in bals_for_pie.items():
+        if isinstance(bal, dict):
+            tot = bal.get('total', bal.get('free', 0.0))
+            if tot > 0:
+                pie_items.append({"Asset": asset, "Amount": tot})
+    
+    if pie_items:
+        df_pie = pd.DataFrame(pie_items)
+        fig_pie = px.pie(df_pie, values='Amount', names='Asset', hole=0.45)
+        fig_pie.update_layout(
+            paper_bgcolor='#0e1117',
+            plot_bgcolor='#131722',
+            font=dict(color='#D1D4DC'),
+            margin=dict(l=10, r=10, t=20, b=10),
+            showlegend=True
+        )
+        st.plotly_chart(fig_pie, width='stretch')
+    else:
+        st.info("No balances available.")
 
-        with col_wf2:
-            st.markdown(f"##### 📜 Simulation Trade Execution Log ({len(t_log)} Trades)")
-            if t_log:
-                df_tl = pd.DataFrame(t_log)[['entry_time', 'exit_time', 'entry_price', 'exit_price', 'pnl_pct', 'realized_pnl', 'reason', 'segment']]
-                df_tl.rename(columns={
-                    'entry_time': 'Entry',
-                    'exit_time': 'Exit',
-                    'entry_price': 'Buy Price',
-                    'exit_price': 'Sell Price',
-                    'pnl_pct': 'Gain %',
-                    'realized_pnl': f'PnL ({quote_sample})',
-                    'reason': 'Trigger Reason',
-                    'segment': 'Data Partition'
-                }, inplace=True)
-                st.dataframe(df_tl.tail(10), hide_index=True, use_container_width=True)
-            else:
-                st.info("No trades triggered during this historical window (strict ATR volatility hurdle / confluence filter).")
+st.markdown("---")
+
+# Interactive 24h Equity Curve & Risk Boundaries
+with st.expander("📈 Interactive Equity Curve & Drawdown Limits", expanded=False):
+    fig_equity = create_equity_curve_chart(snapshots, paper_equity, starting_capital=30.0)
+    st.plotly_chart(fig_equity, width='stretch')

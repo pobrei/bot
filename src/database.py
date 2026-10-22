@@ -104,9 +104,22 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS portfolio_state (
                     id INTEGER PRIMARY KEY,
                     total_equity REAL,
-                    balances_json TEXT
+                    balances_json TEXT,
+                    live_equity REAL,
+                    live_balances_json TEXT,
+                    updated_at TEXT
                 )
             ''')
+
+            # Auto-migrate portfolio_state columns if created previously
+            cursor.execute("PRAGMA table_info(portfolio_state)")
+            p_cols = [c[1] for c in cursor.fetchall()]
+            if 'live_equity' not in p_cols:
+                cursor.execute("ALTER TABLE portfolio_state ADD COLUMN live_equity REAL")
+            if 'live_balances_json' not in p_cols:
+                cursor.execute("ALTER TABLE portfolio_state ADD COLUMN live_balances_json TEXT")
+            if 'updated_at' not in p_cols:
+                cursor.execute("ALTER TABLE portfolio_state ADD COLUMN updated_at TEXT")
 
             # Cached market candles and indicators for interactive charting
             cursor.execute('''
@@ -386,19 +399,33 @@ def get_equity_snapshots(hours: int = 24) -> List[Dict[str, Any]]:
         logger.error(f"Error reading equity snapshots: {e}")
     return snapshots
 
-def save_portfolio_state(total_equity: float, balances: Dict[str, Any]):
+def save_portfolio_state(
+    total_equity: float, 
+    balances: Dict[str, Any], 
+    live_equity: Optional[float] = None, 
+    live_balances: Optional[Dict[str, Any]] = None
+):
     try:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with sqlite3.connect(get_db_path()) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT OR REPLACE INTO portfolio_state (id, total_equity, balances_json)
-                VALUES (1, ?, ?)
-            ''', (total_equity, json.dumps(balances)))
+                INSERT OR REPLACE INTO portfolio_state (
+                    id, total_equity, balances_json, live_equity, live_balances_json, updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?)
+            ''', (
+                float(total_equity), 
+                json.dumps(balances), 
+                float(live_equity) if live_equity is not None else None, 
+                json.dumps(live_balances) if live_balances is not None else None,
+                now_str
+            ))
             conn.commit()
     except Exception as e:
         logger.error(f"Error saving portfolio state: {e}")
 
 def get_portfolio_state() -> Tuple[float, Dict[str, Any]]:
+    """Returns backward-compatible (total_equity, balances) tuple."""
     try:
         with sqlite3.connect(get_db_path()) as conn:
             conn.row_factory = sqlite3.Row
@@ -409,8 +436,27 @@ def get_portfolio_state() -> Tuple[float, Dict[str, Any]]:
                 return float(row['total_equity']), json.loads(row['balances_json'])
     except Exception as e:
         logger.error(f"Error reading portfolio state: {e}")
-    # Return defaults if nothing found
     return 30.0, {}
+
+def get_full_portfolio_state() -> Dict[str, Any]:
+    """Returns comprehensive portfolio state containing both simulated paper and live Binance balances."""
+    try:
+        with sqlite3.connect(get_db_path()) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT total_equity, balances_json, live_equity, live_balances_json, updated_at FROM portfolio_state WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'total_equity': float(row['total_equity'] or 30.0),
+                    'balances': json.loads(row['balances_json'] or '{}'),
+                    'live_equity': float(row['live_equity']) if row['live_equity'] is not None else None,
+                    'live_balances': json.loads(row['live_balances_json']) if row['live_balances_json'] else None,
+                    'updated_at': row['updated_at']
+                }
+    except Exception as e:
+        logger.error(f"Error reading full portfolio state: {e}")
+    return {'total_equity': 30.0, 'balances': {}, 'live_equity': None, 'live_balances': None, 'updated_at': None}
 
 def save_market_candles(symbol: str, timeframe: str, df: Any, regime: str = "UNKNOWN"):
     """
