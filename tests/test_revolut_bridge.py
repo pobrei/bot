@@ -48,7 +48,8 @@ def test_get_candidates_and_intel():
         ["STALE-USD", 1.00, "BUY", 0.90, 1.0, 0.0, "Stale setup older than 12h", now - 50000.0]
     ]
 
-    with patch.object(bridge, "fetch_snapshots", return_value=fake_snapshots):
+    with patch.object(bridge, "fetch_snapshots", return_value=fake_snapshots), \
+         patch.object(bridge, "fetch_active_trades", return_value=[]):
         intel = bridge.get_all_intel(preferred_quote="USDC", force_refresh=True)
         assert "STX/USDC" in intel
         assert "SOL/USDC" in intel

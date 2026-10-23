@@ -154,18 +154,21 @@ class TradingEngine:
 
     def check_emergency_kill_switch(self) -> bool:
         """
-        Checks if kill switch is activated in DB. If active, liquidates all positions and stops.
+        Checks if kill switch is activated in DB. If active, liquidates all positions
+        and puts engine in standby mode until resumed via UI or DB.
         """
         if database.get_kill_switch():
-            logger.warning("🚨 EMERGENCY KILL-SWITCH ACTIVATED. Liquidating all positions and halting! 🚨")
             open_positions = self.tracker.get_open_positions()
-            for symbol in open_positions:
-                logger.warning(f"Kill-Switch: Liquidating {symbol}...")
-                res = self.executor.execute_order(symbol, 'sell')
-                if res:
-                    exit_price = res.get('price', 0.0)
-                    self.tracker.record_exit(symbol, exit_price, "Kill-Switch Activated")
-            logger.warning("All positions liquidated. Engine stopped.")
+            if open_positions:
+                logger.warning("🚨 EMERGENCY KILL-SWITCH ACTIVATED. Liquidating all positions! 🚨")
+                for symbol in open_positions:
+                    logger.warning(f"Kill-Switch: Liquidating {symbol}...")
+                    res = self.executor.execute_order(symbol, 'sell')
+                    if res:
+                        exit_price = res.get('price', 0.0)
+                        self.tracker.record_exit(symbol, exit_price, "Kill-Switch Activated")
+                self.sync_portfolio_state()
+                logger.warning("All positions liquidated. Engine in standby mode.")
             return True
         return False
 
@@ -499,10 +502,10 @@ class TradingEngine:
             while self.is_running:
                 current_time = time.time()
 
-                # 1. Kill-Switch Check
+                # 1. Kill-Switch Check (Standby mode)
                 if self.check_emergency_kill_switch():
-                    self.is_running = False
-                    sys.exit(0)
+                    time.sleep(10)
+                    continue
 
                 # 2. Position Monitor (every 10s)
                 self.monitor_open_positions()

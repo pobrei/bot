@@ -22,7 +22,25 @@ class PortfolioManager:
             'BNB':  {'free': 0.005, 'used': 0.0, 'total': 0.005}
         }
         
-        # If live exchange credentials are valid, seed initial dry_run_state from real wallet
+        # First, try restoring persistent paper state from database
+        self._load_or_seed_dry_run_state()
+
+    def _load_or_seed_dry_run_state(self):
+        """
+        Restores paper portfolio balances from database if previous state exists.
+        Otherwise seeds from genuine live Binance balance if exchange keys exist.
+        """
+        try:
+            from . import database
+            full = database.get_full_portfolio_state()
+            saved_bals = full.get('balances')
+            if saved_bals and isinstance(saved_bals, dict) and any(b.get('total', 0) > 0 for b in saved_bals.values()):
+                self.dry_run_state = saved_bals
+                logger.info(f"Loaded persistent paper portfolio state from database: {list(saved_bals.keys())}")
+                return
+        except Exception as e:
+            logger.debug(f"Could not load paper state from database: {e}")
+
         self._try_seed_dry_run_from_live()
 
     def _try_seed_dry_run_from_live(self):
@@ -32,7 +50,6 @@ class PortfolioManager:
         """
         if not self.exchange:
             return
-        # Check if exchange has API keys configured
         has_keys = getattr(self.exchange, 'apiKey', None) and getattr(self.exchange, 'secret', None)
         if not has_keys:
             return
@@ -40,7 +57,6 @@ class PortfolioManager:
         try:
             live = self.fetch_live_balances()
             if live and any(b.get('total', 0) > 0 for b in live.values()):
-                # Copy live balances into dry_run_state
                 seeded = {}
                 for asset, bal in live.items():
                     seeded[asset] = {

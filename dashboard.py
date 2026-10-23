@@ -214,14 +214,41 @@ if auto_refresh:
     )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 🚨 Emergency Halt Switch")
+st.sidebar.markdown("### 🚨 Engine Control & Kill Switch")
+
+if is_daemon_alive:
+    st.sidebar.success(f"🟢 **Engine Daemon:** Online (`PID {daemon_pid}`)")
+else:
+    st.sidebar.warning("⚪ **Engine Daemon:** Offline")
+    if st.sidebar.button("🚀 START BOT DAEMON", use_container_width=True):
+        import subprocess
+        subprocess.Popen(
+            [sys.executable, "main.py"],
+            stdout=open("trading_bot.log", "a"),
+            stderr=subprocess.STDOUT,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            start_new_session=True
+        )
+        time.sleep(1)
+        st.rerun()
+
 if is_killed:
     st.sidebar.error("⚠️ KILL-SWITCH ACTIVE\nTrading is paused.")
     if st.sidebar.button("▶️ RESUME BOT TRADING", type="primary", use_container_width=True):
         database.set_kill_switch(False)
+        if not is_daemon_alive:
+            import subprocess
+            subprocess.Popen(
+                [sys.executable, "main.py"],
+                stdout=open("trading_bot.log", "a"),
+                stderr=subprocess.STDOUT,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                start_new_session=True
+            )
+            time.sleep(1)
         st.rerun()
 else:
-    st.sidebar.success("🟢 Kill-Switch Inactive\nBot is authorized to trade.")
+    st.sidebar.caption("🟢 Kill-Switch Inactive (Trading authorized)")
     if st.sidebar.button("🛑 EMERGENCY HALT", type="primary", use_container_width=True):
         database.set_kill_switch(True)
         st.rerun()
@@ -408,7 +435,7 @@ with c_pos_left:
                 "Protection Status": ts_status,
                 "Opened At": pos.get("entry_time", "N/A")
             })
-        st.dataframe(pd.DataFrame(pos_rows), hide_index=True, width='stretch')
+        st.dataframe(pd.DataFrame(pos_rows), hide_index=True, use_container_width=True)
     else:
         st.info("ℹ️ No active open positions. Capital is 100% safe in cash. The engine is scanning for high-conviction breakout setups.")
 
@@ -422,7 +449,7 @@ with c_pos_right:
                 "Remaining": f"{cd['mins_remaining']}m",
                 "Reason": cd["reason"]
             })
-        st.dataframe(pd.DataFrame(cd_rows), hide_index=True, width='stretch')
+        st.dataframe(pd.DataFrame(cd_rows), hide_index=True, use_container_width=True)
     else:
         st.caption("No pairs currently in cooldown. Full universe is eligible for scanning.")
 
@@ -462,7 +489,7 @@ for s in available_symbols:
             })
 
 if radar_records:
-    st.dataframe(pd.DataFrame(radar_records), hide_index=True, width='stretch')
+    st.dataframe(pd.DataFrame(radar_records), hide_index=True, use_container_width=True)
 else:
     st.info("Market data is synchronizing. Dynamic spectrum radar will populate on the next candle cycle.")
 
@@ -489,7 +516,7 @@ if chart_engine == "🤖 Bot Strategy Engine (Plotly)":
     if candle_data is not None:
         df_c, regime_c, updated_c = candle_data
         fig_candle = create_interactive_candlestick(selected_asset, df_c, regime=regime_c, timeframe=TIMEFRAME)
-        st.plotly_chart(fig_candle, width='stretch')
+        st.plotly_chart(fig_candle, use_container_width=True)
     else:
         st.warning(f"No cached candle data for {selected_asset}. It will be captured during the next candle close.")
 else:
@@ -521,7 +548,7 @@ with c_hist_left:
             'realized_pnl': f'PnL ({quote_sample})',
             'reason': 'Exit Reason'
         }, inplace=True)
-        st.dataframe(hist_display, hide_index=True, width='stretch')
+        st.dataframe(hist_display, hide_index=True, use_container_width=True)
     else:
         st.info("No recorded trades in trade history.")
 
@@ -546,7 +573,7 @@ with c_hist_right:
             margin=dict(l=10, r=10, t=20, b=10),
             showlegend=True
         )
-        st.plotly_chart(fig_pie, width='stretch')
+        st.plotly_chart(fig_pie, use_container_width=True)
     else:
         st.info("No balances available.")
 
@@ -555,4 +582,4 @@ st.markdown("---")
 # Interactive 24h Equity Curve & Risk Boundaries
 with st.expander("📈 Interactive Equity Curve & Drawdown Limits", expanded=False):
     fig_equity = create_equity_curve_chart(snapshots, paper_equity, starting_capital=30.0)
-    st.plotly_chart(fig_equity, width='stretch')
+    st.plotly_chart(fig_equity, use_container_width=True)
